@@ -1,0 +1,5 @@
+# Rust build output
+/target/
+
+# Local measurement corpus and derived data: never committed (D-007)
+/data/
