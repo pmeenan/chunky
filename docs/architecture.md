@@ -1,150 +1,176 @@
 # Architecture
 
-> **Status: skeleton.** The first full draft is an M0 exit criterion. What is
-> written here now is the load-bearing shape already settled, so drafting can
-> build on it rather than re-derive it. The *encoder* architecture is in
-> [design.md](design.md). This doc covers how that design maps onto code,
-> tools and the Worker deployment.
+> **Status: contract draft.** Toolchain, fork mechanics, Worker shell, blob
+> delivery and numeric resource caps remain M0 choices. This document specifies
+> the required interfaces and behavior; it does not claim they are implemented.
+> The encoder mechanisms are in [design.md](design.md).
 
-## Fixed points (from decisions)
+## Fixed points
 
-- **Output is standard brotli** (D-002). Every path that produces bytes for a
-  client is round-trip tested against an independent decoder.
-- **design.md is the baseline** (D-001). The hot-path pipeline is chunker →
-  cache lookup → resolve references → flush (count + tables + meta-block) →
-  finalization. Shared state is the parse cache, dictionary sidecars and route
-  model. Learning tiers are inline counters, post-stream finalization, the
-  upgrade queue and the offline fleet model.
-- **Rust core, CLIs and wasm in one Cargo workspace; encoder forked from
-  rust-brotli** (D-003).
-- **Server deployment is a Cloudflare Worker compressing proxy** (D-004). It
-  uses `encodeBody: "manual"` and stays within 128 MB per isolate including
-  wasm memory. Per-request CPU budget depends on the plan.
-- **Hot path reads; learning writes off-request; the cold path is valid**
-  (D-008). In the Worker deployment, runtime shared state is immutable per
-  versioned model blob so cross-isolate determinism holds by construction
-  (D-011).
-- **Admission gate is the only route into shared state** (D-009), and upgrade
-  parses run over composite sequences of admitted chunks with chunk-bounded
-  references (D-010).
-- **Corpus lives outside the repo** (D-007).
-- **Per-stream window memory is demand-paged and dictionaries are zero-copy**
-  so concurrent streaming requests fit within the 128 MB isolate cap (D-011).
+- Ordinary responses use RFC 7932 `br`; optional negotiated CDT uses RFC
+  9841/9842 `dcb`. Independent decoders must recover the exact input (D-012).
+- Rust core, CLIs and wasm share one workspace, using a rust-brotli fork
+  (D-003). Cloudflare Workers is the server deployment (D-004).
+- Streaming initially completes actual-length meta-blocks at logical flushes.
+  Exact-length single-block work is parked after M5; no decoded padding (D-012).
+- Runtime models/caches are immutable and pinned per stream. All training is
+  offline from approved public sources and eligible spans (D-011/D-013).
+- Determinism includes logical flush positions and encoder options, and uses
+  deterministic work limits. Network scheduling is not a deterministic input
+  boundary (D-014).
+- Memory admission and fallback are isolate/stream-state contracts, not
+  consequences of demand-grown buffers (D-014).
 
-## Expected shape (to be validated in the M0 draft)
+## Workspace
 
-Where a bullet below leans on a `proposed` features.md row, it is a design
-assumption to confirm during feature triage, not settled scope.
-
-### Workspace
-
-A sketch for M1 to confirm or rename:
+Names and fork packaging remain M0 choices.
 
 | Crate / dir | Role | Targets |
 | --- | --- | --- |
-| `brotli` fork (vendored or git dependency; open question 2) | Entropy coder + meta-block writer with command-list injection (fast single-table + q11 oracle modes); reference q1/q11 encoder | native, wasm32 |
-| `chunky-core` | Chunker, parse cache, stitcher, fast hasher, route model, table build, streaming layout, mode selection, admission gate. Demand-grown window buffers and zero-copy dictionary references. No I/O, threads or clocks: time budgets and storage come in through traits | native, wasm32 |
-| `chunky-formats` | Versioned binary formats: cache entries, model blob, warm cache set, dictionary sidecar. Header plus version check; mismatch falls back to the generic path | native, wasm32 |
-| `chunky-cli` (one binary with subcommands, or several bins) | crawl, label-routes, baseline, overlap, encode, train, verify, inspect, replay, bench, and (M8) sidecar | native |
-| `worker/` | Cloudflare Worker: request handling, origin fetch, streaming compress, state loading | wasm32 (+ JS shell if chosen) |
+| `brotli` fork | External commands, fast/q11 oracle tables, per-flush writer and reference q1/q4/q11 | native, wasm32 |
+| `chunky-core` | Chunking, immutable cache lookup, reference resolution, bounded miss search, tables and streaming encoder | native, wasm32 |
+| `chunky-formats` | Validated versioned model/warm-cache blobs in M4; sidecars in M8 | native, wasm32 |
+| `chunky-cli` | crawl, label, baseline, overlap, encode, train, verify, inspect, replay, bench, sidecar | native |
+| `worker/` | Negotiation, origin fetch, artifact loading, memory admission, stream pump and cancellation | wasm32 plus JS if selected |
 
-`chunky-core` stays `#![no_std]`-friendly, or at least free of `std::fs`,
-threads and `Instant`, so the same code runs in the CLIs and the Worker. The
-CLIs supply native implementations of the I/O traits, and the Worker supplies
-Workers-runtime ones.
+The core has no filesystem, threads or clocks. Wrappers supply buffers, explicit
+logical flush events and immutable artifact handles. Work budgets count search
+candidates/bytes compared; clock-based cancellation belongs to the wrapper and
+cannot select different valid encoded bytes within the determinism contract.
+Fixed iteration and tie-breaking rules apply across native and wasm builds.
 
-### Memory budget and window management in wasm (D-011)
+## Core stream interface and determinism
 
-A single Worker isolate handles many concurrent streaming requests overlapped on
-origin network I/O, and wasm linear memory (`memory.grow`) never shrinks for the
-life of the isolate. To stay well under the 128 MB isolate limit:
+Conceptually the interface accepts `feed(bytes)`, `flush()` and `finish()`.
+Feeds can be split arbitrarily; logical flush positions are part of the input.
+Empty flushes and repeated flushes at the same offset are no-ops. Options include
+route/model/cache/chunker versions, dictionary identity, lgwin, mode and work
+limits. Identical bytes, flush positions and options produce identical output.
 
-- **Shared immutable state:** One isolate-global wasm instance holds the loaded
-  model blob, warm parse cache and any retained CDT dictionary + sidecar once
-  per isolate, shared read-only across all requests in that isolate.
-- **Demand-grown per-stream window buffers:** Logical `lgwin` (typically 22, or
-  up to 24 with CDT) is decoupled from physical buffer allocation. A stream's
-  window slab starts small (e.g. 64 KB for HTML/JSON) and grows on demand or
-  draws from a bounded pool, rather than eagerly allocating `1 << lgwin` (4 to
-  16 MB) per active encoder.
-- **Zero-copy CDT dictionaries:** Negative window offsets (`< 0`) read directly
-  from the shared immutable dictionary slice rather than copying dictionary
-  bytes into each stream's ring buffer.
+Each actual-length block is fully parsed/countable before its header is emitted.
+Blocks close at the configured cumulative byte cap independently of feed boundaries. A flush
+ends the pending block, permits a final literal run and aligns delivery as needed.
+EOF closes the same brotli stream. No API discards an open block and silently
+starts a new independent stream. The parked exact-length path must distinguish
+EOF success from length mismatch and handle pending command fields explicitly.
 
-### Data flow between tools and the Worker
+The initial Worker calls a logical flush after each nonempty origin read;
+replaying the same body with a different read schedule can change compression.
+Core fragmentation tests hold logical flush positions fixed. End-to-end delivery
+tests measure paced markers, not preservation of origin writes as read chunks.
+Same-tick coalescing is parked pending evidence about its latency and scheduling.
+
+## Isolate-wide memory budget
+
+Cloudflare's 128 MB limit includes runtime/wasm allocations; wasm linear memory
+retains its high-water allocation. Demand-grown windows reduce typical allocation
+but cannot prove safety under concurrency. Before M6, the Worker spike sets an
+application allocation cap strictly below the limit, with measured runtime
+headroom. Account for:
+
+- Shared immutable wasm/model/cache/dictionary/sidecar storage, including any
+  backing JS copies and old/new versions during refresh.
+- Reserved per-stream maxima: allowed rolling window, hasher/index, chunk and
+  command storage, table scratch, input/lookahead, completion buffer, queued
+  output and JS/wasm transfer copies. Include reference-q1 fallback allocations.
+- Allocator fragmentation and transient growth peaks; reusing a bounded pool
+  must not cause unaccounted new wasm memory growth.
+
+Compression admission reserves the allowed worst-case stream allocation before
+headers or bytes commit. Allocate lazily within that reservation. Reserve shared
+model-load/refresh peaks before loading; retain the old version or reject an
+update if capacity is unavailable. Pin one artifact until its streams finish.
+Dictionary references read the shared slice directly, using Shared Brotli's
+separate address region; dictionary bytes are not copied into each stream window.
+
+If a reservation fails, select an acceptable pass-through/identity representation
+or a separately budgeted q1 path before commitment; otherwise return an error.
+Do not reduce a committed lgwin or wait indefinitely for compression capacity.
+Bound the pump's input/output queues, await downstream capacity before reading
+more origin input, and release streams/reservations on completion, failure or
+cancellation. Memory tests include long responses, slow consumers, many active
+streams and simultaneous model refresh. Record actual peaks and application
+accounting, not just initial buffer sizes.
+
+## Offline data and artifact flow
 
 ```
-crawl ──► corpus (local, git-ignored) ──► baseline / overlap / encode / bench
-                                     └──► train ──► model blob + warm cache set
-                                                         │  (versioned format)
-                                                         ▼
-                              Worker loads at isolate start (storage: open Q4)
+approved public crawl (local raw captures)
+    -> source/span eligibility filter
+    -> chronological training / tuning / held-out evaluation manifests
+    -> train and freeze model + warm cache + cut rules
+    -> M4 versioned blob -> validated native/wasm loader -> Worker
+
+held-out evaluation -> baseline / overlap / encode / replay / bench reports
+live Worker requests -> bounded aggregate performance counters only
 ```
 
-The offline trainer CLI is the design's "offline fleet model". Running it
-against the corpus and shipping its output to the Worker is how cross-instance
-determinism holds: every isolate loads the same versioned blob.
+Raw captures stay local under D-007. Eligibility applies before deriving all
+training histograms, samples and chunk sequences (D-013); no whole-response
+sampling exception exists. Manifests record provenance, route, capture time,
+body identity and logical-flush provenance. Frozen evaluation never updates the
+artifacts. Separate same-response warm replay and naturally repeated bodies from
+new-response generalization; include stale/template-change tests (D-015).
 
-### Worker request path
+Blob compatibility covers site/route, chunker and encoder/format versions.
+Validate lengths, offsets and allocation bounds before exposure to the core.
+A mismatch selects reference q1 before commitment. Serialization/loading lands
+in M4; M7 validates rollout and freshness, not the initial loader.
 
-Patterned on the owner's
-[dictionary-worker](https://github.com/pmeenan/dictionary-worker), which
-already does transparent streaming compression on Workers:
+## Worker request path
 
-1. Request arrives. Kick off lazy, isolate-global wasm and model init *in
-   parallel* with the origin `fetch` (dictionary-worker's `wasmLoaded`
-   promise pattern) so cold starts overlap origin latency.
-2. Negotiate: client accepts `br` (check `request.cf.clientAcceptEncoding`;
-   the Worker may see a normalized `Accept-Encoding`), and the response is
-   eligible (status 200, compressible content type, not a `206 Partial Content`
-   or an un-decoded custom encoding such as `dcb`/`dcz`). Note that when an
-   origin sends `Content-Encoding: gzip` or `br`, Cloudflare's `fetch()`
-   transparently decompresses `originResponse.body` while leaving the origin's
-   `Content-Encoding` and compressed `Content-Length` headers on
-   `originResponse.headers`. Treat `Content-Length` as the known uncompressed
-   `MLEN` *only* when `originResponse.headers.get("content-encoding")` is
-   absent; otherwise `Content-Length` only indicates that the origin buffered
-   the response before sending headers (D-011).
-3. Prepare outgoing headers: set `Content-Encoding: br`, merge `Vary:
-   Accept-Encoding`, strip `Content-Length` (and any origin template-hint
-   headers), and convert any strong `ETag` (`"xyz"`) to weak (`W/"xyz"`) per
-   RFC 9110 §8.8.3. Return `new Response(readable, { encodeBody: "manual", ... })`
-   from a `TransformStream` immediately.
-4. Compression runs inside `ctx.waitUntil(...)`. Each origin `reader.read()`
-   feeds the encoder. Streaming-critical responses flush per read (with
-   same-tick coalescing), and completion-bound ones buffer to a cap. On any
-   encoder error, budget overrun or format version mismatch, fall back safely
-   before bytes are committed (or via reference q1).
-5. Finalization runs after the last byte inside `waitUntil` and only records
-   telemetry / chunk-frequency counters / out-of-band samples. Runtime shared
-   state inside the isolate is never mutated in place (D-011).
+Patterned on [dictionary-worker](https://github.com/pmeenan/dictionary-worker),
+with explicit admission, commitment and cancellation behavior:
 
-dictionary-worker's brotli path noted that the stock encoder "doesn't handle
-streaming incremental chunks" (it flushes when it decides to). Our encoder
-owns its flush decisions, which is the point of the streaming layout.
+1. Start bounded lazy wasm/model init alongside origin fetch; resolve artifact
+   compatibility, mode and memory admission before committing the outgoing response.
+2. Negotiate the client's original encodings (including q-values; the Worker may
+   receive normalized Accept-Encoding). Check `request.cf.clientAcceptEncoding`
+   behavior in the spike. Respect no-transform, HEAD/bodyless statuses, ranges
+   and unsupported encodings. Strip internal hint headers on every outgoing path.
+3. Treat upstream Content-Length as exact uncompressed length only for a trusted
+   unencoded representation. An encoded length is never MLEN and does not prove
+   that the origin buffered the body. Verify transparent decompression and header
+   behavior with the selected runtime; maintain an explicit representation state.
+4. Once admitted, set Content-Encoding, merge Vary, remove encoded-length and
+   other invalidated representation metadata, and weaken strong ETags as needed.
+   For `br`, return a streaming Response with `encodeBody: "manual"`. M8 adds
+   dcb framing/identity and its Vary/negotiation rules separately.
+5. Pump bounded blocks with per-read flushes for streaming responses and a
+   deterministic byte cap for completion buffering. Await output capacity;
+   cancel origin reads and dispose the encoder if the client cancels.
+6. Finish and release resources. Shed optional aggregate performance recording
+   first. `waitUntil` may manage lifecycle/recording, but does not provide another
+   CPU thread or permission to retain bodies for training.
 
-### Where the learning tiers run on Workers (D-011, open Q4)
+## Commitment and failure states
 
-| Design tier | Native (CLI / future server) | Worker |
-| --- | --- | --- |
-| Inline | In the encoder (reads only) | In the encoder (reads immutable versioned blob only) |
-| Post-stream finalization | After last byte | After last byte inside `waitUntil`; isolate-local counters / out-of-band telemetry |
-| Async upgrade queue | Background thread or offline | Folded into the offline trainer so isolates stay deterministic and within CPU limits |
-| Offline fleet model | `chunky train` CLI | Same CLI; publishes a new versioned model + warm cache blob to Workers storage |
+| State | Allowed behavior on failure |
+| --- | --- |
+| **Preparing**: neither outgoing headers nor encoded bytes committed | Select compatible q1 or acceptable origin/identity representation, with matching headers and reservation; otherwise return an error |
+| **Streaming**: Response handed to runtime or encoded output written | Keep encoding and stream state. At a healthy completed block boundary, optionally continue with bounded uncompressed meta-blocks inside the same br stream. Pending commands/blocks must finish validly before that transition |
+| **Completed**: valid encoder EOF written | Release state; optional recording may be shed |
+| **Aborted**: state/input unrecoverable or request terminated | Error/cancel the body, cancel upstream, release state. Do not synthesize valid EOF, identity suffixes or a fresh compressed stream |
 
-## Open architecture questions
+For bounded precommit probing, retain only the bytes allowed by the configured
+cap and replay them into the chosen encoder. Returning the Response is treated
+conservatively as commitment even if no body bytes have been written yet. A
+hard runtime CPU/memory termination is not a catchable fallback guarantee;
+precommit reservations/work limits and healthy boundary continuations reduce
+risk but do not promise recovery from termination.
 
-The ranked list is in [features.md](features.md#open-questions-answer-during-m0).
-The ones this doc must answer before its first full draft:
+Test model rejection, first-write failure, recoverable budget checks, faults
+within literals/copies, block boundaries, truncated origin input and downstream
+cancellation. The initial per-flush path can preserve a healthy encoder at block
+boundaries; the parked open-block path needs its own demonstrated continuation.
 
-- Workers state placement and how the upgrade tier runs there (Q4).
-- JS shell vs workers-rs, and the wasm/JS boundary for streaming chunks:
-  copy-in/copy-out buffers as in dictionary-worker, or a shared-memory view
-  (Q7).
-- rust-brotli fork mechanics and where command injection plugs in (Q2).
-- The I/O trait surface of `chunky-core` (time budget, storage, randomness if
-  any), designed so determinism (same input + same model version → same bytes)
-  holds across native and wasm.
-- How the model blob reaches isolates: bundled in the Worker, static assets
-  binding (dictionary-worker served dictionaries this way), R2, or KV. This
-  bounds how fast models can update relative to deploys.
+## Remaining M0 architecture choices
+
+- Fork packaging and injection surface (Q2), shell/JS-wasm buffer interface (Q7).
+- Model distribution via bundled blob, Static Assets, R2 or KV (Q4), with bounded
+  loading/refresh and response version pinning.
+- Numeric shared/per-stream/pool limits and runtime headroom from the spike;
+  explicit callback/error surface for commitment, backpressure and cancellation.
+- Destination for aggregate operational telemetry, excluding training records.
+- Public source/span policy, chronological split and route namespace below the
+  required tenant/site partition. Live session identity is unnecessary (D-013).

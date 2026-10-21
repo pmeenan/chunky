@@ -9,12 +9,14 @@ remembers parse and modeling decisions across responses instead of
 recomputing them per stream. The full technical design is in
 [docs/design.md](docs/design.md).
 
-- **Standard output.** It emits ordinary brotli (RFC 7932) that any current
-  browser decodes, with no new content-encoding and no client changes.
+- **Standard output.** Ordinary responses use brotli (RFC 7932); optional CDT
+  variants use negotiated `dcb` (RFC 9841/9842). Decoding preserves every input
+  byte, with no custom client changes.
 - **Memoized encoding.** A content-defined parse cache and pre-trained
   per-route entropy models replace the expensive parts of q11.
-- **Streaming-aware.** It is designed for servers that flush on every write,
-  without per-flush header overhead.
+- **Streaming-aware.** Per-flush meta-blocks preserve prompt delivery while
+  learned tables reduce header cost. A single-meta-block optimization is a
+  later experiment, gated on exact lengths and measured delivery behavior.
 - **Rust, native and wasm.** One codebase builds CLI tools for crawling,
   measuring and training, and a Cloudflare Worker that runs the encoder as a
   compressing proxy.
@@ -25,8 +27,8 @@ What else is in or out of scope is being triaged in
 ## Status
 
 **Pre-code, milestone M0 (planning).** No code exists yet. The first
-measurement milestone checks whether real templated sites repeat enough bytes
-per route for the design to pay off. See [docs/plan.md](docs/plan.md).
+measurement milestone measures reuse on later responses held out from training,
+against matched q1/q4/q11 baselines. See [docs/plan.md](docs/plan.md).
 
 ## How it's built
 

@@ -20,10 +20,10 @@ Constraints evolve as we learn, but never by silent drift: changing one means
 making the case in [docs/decisions.md](docs/decisions.md) and updating the
 affected docs. Until then, these govern.
 
-- **Standard brotli out, always.** Every byte we emit must decode with an
-  unmodified RFC 7932 decoder: no new content-encoding, no decoder or spec
-  changes. Any encoder-output change is tested by decoding with an independent
-  reference decoder. (D-002)
+- **Standard formats, exact original bytes.** Ordinary responses use RFC 7932
+  `br`; negotiated CDT uses RFC 9841/9842 `dcb`. No custom formats or decoder
+  changes. Every output path round-trips through an independent reference
+  decoder to the exact input, without content padding. (D-002, D-012)
 - **The design doc is the baseline.** [docs/design.md](docs/design.md) and its
   decisions table are the accepted starting architecture. Deviations get a new
   D-entry. (D-001)
@@ -36,10 +36,12 @@ affected docs. Until then, these govern.
   per-request CPU caps. (D-004)
 - **Hot path reads, learning writes off-request.** The compression path only
   reads shared state. Learning can be shed without affecting validity, and a
-  cold cache still produces valid output at q1 quality or better. (D-008)
-- **Admission gate is the privacy boundary.** Nothing response-derived enters
-  shared state, generated dictionaries or samples until it has been seen across
-  N distinct sessions. Secret slots are literal-only and never indexed. (D-009)
+  cold cache uses reference q1 with the same window and flush policy. (D-008,
+  D-014)
+- **Learning uses approved public data only.** Shared caches, models,
+  dictionaries and samples all pass the same source and span eligibility gate.
+  Private traffic never trains them; repetition is not proof of publicity.
+  Secret slots are literal-only and never indexed. (D-013)
 - **Corpus stays out of the repo.** Crawled responses live in a local data
   directory and are never committed. Tests use small synthetic or
   permissively-licensed fixtures. (D-007)
@@ -109,7 +111,7 @@ build → commit loop, on-demand reviews, and the human commit gate.
 ## Current status
 
 Milestone **M0 (plan the plan)**: the feature set, architecture, and milestone
-ladder are being worked out through planning conversations. See
-[docs/plan.md](docs/plan.md). No code exists yet; the workspace scaffolding is
-M1. Keep this paragraph short and current when plan.md milestone status changes
-(rule 4).
+ladder include the design-review corrections; corpus/toolchain choices and
+Worker/fork spikes remain open. See [docs/plan.md](docs/plan.md). No code
+exists yet; workspace scaffolding is M1. Keep this paragraph short and current
+when plan.md milestone status changes (rule 4).

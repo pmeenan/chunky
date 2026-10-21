@@ -30,7 +30,154 @@ Decision / Context / Consequences / Reopen if
 
 ---
 
-## D-011: Worker shared state is immutable per model version; per-stream window memory is demand-paged; origin Content-Length requires unencoded check  (2026-10-21, status: accepted)
+## D-015: Evaluate frozen artifacts on later captures; establish per-flush encoding before single-block experiments  (2026-10-21, status: accepted)
+
+**Decision.** Training, tuning and evaluation captures are separate and ordered
+in time. Freeze the route model, parse cache and cut rules before evaluating
+later responses; include a template-change slice and report duplicate bodies
+separately. Two-pass replay of the same responses remains an explicitly labeled
+diagnostic. Baselines are reference q1/q4/q11 with matched windows and logical
+flush positions, cross-checked against C brotli. Report both reuse potential
+and references legal in the current response; cross-response overlap is not a
+compression-size ceiling for ordinary `br`.
+
+M1 records the baseline; the owner sets numerical size-gap recovery, CPU,
+latency and memory targets before M3/M4 evaluation. Report per-route regressions
+and cache-only/model-only/combined ablations. M2 establishes per-flush output;
+M4 includes versioned artifact loading; M5 validates streaming before M6 proxy
+integration. M7 measures fleet rollout and freshness rather than introducing
+the blob loader. Exact-length single-meta-block work follows these measurements
+as a parked experiment, not a dependency of M1–M7.
+
+**Context.** Replaying training responses can hide lack of generalization.
+An immutable Worker model already needs a working loader before deployment.
+Separating the streaming experiment makes parse/model gains independently
+measurable without assuming padding or browser delivery behavior.
+
+**Consequences.** Updates the D-001 milestone baseline; see [plan.md](plan.md)
+for scopes, verification and remaining M0 questions. No performance target is
+claimed achieved by this planning change.
+
+**Reopen if.** Held-out results or deployment measurements justify a different
+order or evaluation protocol; retain a separate unbiased evaluation slice.
+
+## D-014: Determinism includes flushes and options; fallback follows stream state; memory is bounded per isolate  (2026-10-21, status: accepted)
+
+**Decision.** Amend D-008/D-011 as follows:
+
+- Deterministic encoding takes bytes, ordered logical flush positions, route,
+  model/cache versions, dictionary identity and encoder options as inputs.
+  Match search uses deterministic work limits. Arbitrary input fragmentation
+  does not change output when logical flushes stay fixed. Worker read boundaries
+  and event-loop scheduling are not reproducible application flush signals.
+- A cold or rejected model selects reference q1 before encoding, with the same
+  window and flush policy. Validity is unconditional; warm-model size improvement
+  and monotonic improvement are measured hypotheses, not guarantees.
+- Before returning headers or writing encoded bytes, fallback may select an
+  acceptable identity/origin representation or reference q1. After commitment,
+  preserve the encoding and encoder state. At a completed meta-block a healthy
+  encoder may continue with bounded uncompressed meta-blocks in the same stream.
+  An open command/block must finish validly before that transition. Unrecoverable
+  state, truncated origin input or hard resource termination aborts the stream;
+  never append identity bytes or a new independent brotli stream.
+- Demand growth is an allocation optimization, not a capacity bound. Before
+  commitment, reserve each admitted stream's worst-case allowed window,
+  parsing/output buffers and JS/wasm transfer allowance from a bounded pool.
+  Include shared state, model-loading peaks, allocator/growth peaks and runtime
+  headroom in the isolate budget. Await downstream capacity before reading more
+  input, and release reservations on completion, failure or cancellation.
+
+**Context.** Immutable models cannot remove dependence on read fragmentation
+or clock-based search cutoffs. Once a response is committed, a new compressor
+cannot replace its existing bitstream. Many small initial buffers can still
+grow beyond the Worker memory limit concurrently.
+
+**Consequences.** The architecture specifies commitment states and budget
+accounting. M2/M5 test deterministic fragmentation and valid continuation;
+M6 injects faults and runs concurrent slow-consumer memory checks. Numeric
+pool limits and headroom are set from the Worker spike, not assumed safe.
+Live request bodies, fingerprints and histograms do not enter training (D-013).
+
+**Reopen if.** A different determinism contract or bounded continuation is
+needed. Resource-failure aborts must remain distinguishable from valid EOF.
+
+## D-013: Approved public sources and eligible spans govern all learning  (2026-10-21, status: accepted)
+
+**Decision.** Supersede D-009's N-session privacy claim. Initial learning is
+offline and uses only operator-approved public corpus sources with explicit
+span exclusions. Private responses (`Cache-Control: private` or `no-store`,
+`Set-Cookie`, request credentials) and known secret spans are ineligible.
+Neither missing privacy headers nor repeated occurrence proves content public.
+Partition artifacts by tenant/site. Frequency across eligible public captures
+is an optional usefulness filter, not authorization to share content.
+
+The same gate covers cache entries, model statistics, cut rules, dictionaries
+and exported training samples. Keep raw crawl captures local under D-007;
+derive trainer inputs only after eligibility filtering. Never export a whole
+response through a sampling exception. Worker requests contribute no bodies,
+fingerprints, route histograms or other content-derived training records.
+Operational telemetry is limited to bounded aggregate performance counters.
+
+Secret hints still force literal-only emission and exclude indexing/match
+targets. Token detection remains heuristic. These rules alone do not prove
+BREACH resistance: table counts, contexts and boundaries can still depend on
+secret bytes. Any later private-serving policy must analyze those channels;
+do not claim structural noninterference from literal-only emission.
+
+**Context.** A confidential value can appear in N users' responses, and a
+session count does not establish public availability. Whole-response sampling
+and shared histograms must not bypass the source/span gate.
+
+**Consequences.** No live learning pipeline or session identifiers are needed
+for M1–M7. Offline provenance and filtering precede training. The confirmed
+secret-slot feature is a mitigation, not a security proof.
+
+**Reopen if.** Learning from private traffic becomes a requirement and a
+concrete authorization and information-flow design replaces this exclusion.
+
+## D-012: Exact decoded bytes, per-flush baseline, and separate br/dcb format contracts  (2026-10-21, status: accepted)
+
+**Decision.** Amend D-002 and D-010 items 1/2/3/5:
+
+- Preserve the exact input bytes. Initial streaming uses meta-blocks with
+  actual lengths, completed at logical flushes; never pad the decoded body.
+  Estimated-MLEN whitespace padding is rejected. Single-meta-block encoding
+  is parked until an exact length is available and total delay is measured.
+- Commands encode copy lengths before literals, but stopping input and exposing
+  partial literal output mid-command is permitted. Copy completion at every
+  flush is an encoder policy, not an RFC invariant. Pending command fields,
+  unmatched tails and bit alignment all contribute to withheld bytes. There
+  is no established universal 2–4-byte delay bound.
+- Ordinary responses use RFC 7932 `br`. Optional negotiated CDT variants use
+  Shared Brotli under RFC 9841 and `dcb` framing under RFC 9842, including its
+  36-byte header and dictionary identity. These are existing formats; neither
+  path invents a content-encoding or changes a client decoder.
+- At a copy position `p`, let `M = min(p, (1 << lgwin) - 16)` and dictionary
+  size be `D`. A CDT dictionary reference to byte offset `o` has wire distance
+  `M + D - o`. Static dictionary word ID `w` uses `M + D + 1 + w` (`D = 0`
+  for ordinary `br`). The dictionary remains accessible outside the rolling
+  window; dictionary plus response need not fit that window.
+
+**Context.** Padding contradicts byte-identical verification and is observable
+to byte consumers. A local C-decoder probe returned literals before the copy
+distance arrived (RE-001); browser parser delivery is still unverified.
+The original CDT formula used uncapped response position, which fails after
+the rolling window fills. Sources checked during review:
+[RFC 7932 §§5/9.3](https://www.rfc-editor.org/rfc/rfc7932.html#section-9.3),
+[RFC 9841 §3.2](https://www.rfc-editor.org/rfc/rfc9841.html#section-3.2),
+[RFC 9842 §4](https://www.rfc-editor.org/rfc/rfc9842.html#section-4), and the
+[reference decoder](https://github.com/google/brotli/blob/master/c/dec/decode.c).
+
+**Consequences.** Keep D-010's chunk-contained references and logical distance
+resolution. Independent round trips use an RFC 7932 decoder for `br` and a
+Shared Brotli decoder with the negotiated dictionary for `dcb`. Add fixtures
+on both sides of window saturation and validate dcb negotiation/framing in M8.
+
+**Reopen if.** Exact-length single-block experiments prove worthwhile without
+changing decoded bytes or violating the delivery target. Content-transforming
+padding would require separate explicit scope; it is not an encoder fallback.
+
+## D-011: Worker shared state is immutable per model version; per-stream window memory is demand-paged; origin Content-Length requires unencoded check  (2026-10-21, status: accepted; amended by D-013/D-014)
 
 **Decision.**
 1. **Immutable runtime state per model version.** In the Worker deployment,
@@ -66,7 +213,7 @@ logical `lgwin` from physical buffer capacity.
 **Reopen if.** Offline-only model refreshes prove too slow for rapidly
 changing templates and an in-process or edge-coordinated upgrade loop is needed.
 
-## D-010: RFC 7932 format invariants for stitched commands and one-meta-block streaming  (2026-10-21, status: accepted)
+## D-010: RFC 7932 format invariants for stitched commands and one-meta-block streaming  (2026-10-21, status: accepted; items 1/2/3/5 amended by D-012)
 
 **Decision.** Five format and stitcher invariants refine [design.md](design.md):
 1. **Mid-meta-block flushes end on a copy, and alignment fallback splits the
@@ -118,7 +265,7 @@ tests in M2–M5 should specifically exercise these edge cases.
 **Reopen if.** Never for RFC 7932 rules; padding or MLEN heuristics may be
 tuned once M5 flush-replay numbers are in hand.
 
-## D-009: Admission gate is the single privacy boundary; secret slots are literal-only  (2026-10-21, status: accepted)
+## D-009: Admission gate is the single privacy boundary; secret slots are literal-only  (2026-10-21, status: superseded by D-013)
 
 **Decision.** Response-derived content (parse-cache entries, generated
 dictionary contents, offline training samples) enters shared state only after
@@ -142,7 +289,7 @@ without storing user identifiers.
 **Reopen if.** A formal analysis shows a cheaper boundary with equal
 guarantees, or the gate makes hit rates on the target corpus too low to matter.
 
-## D-008: Hot path reads; finalization records; learning computes off-request  (2026-10-21, status: accepted)
+## D-008: Hot path reads; finalization records; learning computes off-request  (2026-10-21, status: accepted; amended by D-013/D-014)
 
 **Decision.** The per-request compression path only reads shared state (parse
 cache, route model, dictionary sidecars). The post-stream pass only records.
@@ -275,7 +422,7 @@ upstreamable patches) is an M0 question.
 much harder than the C reference, or its output or performance diverges
 materially from C at the same quality.
 
-## D-002: Emit standard brotli only; no decoder, spec, or content-encoding changes  (2026-10-21, status: accepted)
+## D-002: Emit standard brotli only; no decoder, spec, or content-encoding changes  (2026-10-21, status: accepted; amended by D-012)
 
 **Decision.** chunky output is a valid RFC 7932 brotli stream decodable by any
 current browser. No new content-encoding, no decoder modifications on the
@@ -294,7 +441,7 @@ on the client.
 **Reopen if.** Never silently. A format extension would be a different
 project.
 
-## D-001: docs/design.md is the accepted baseline design  (2026-10-21, status: accepted)
+## D-001: docs/design.md is the accepted baseline design  (2026-10-21, status: accepted; amended by D-012–D-015)
 
 **Decision.** [design.md](design.md) (Oct 21, 2026) and its decisions table
 are adopted as the starting architecture. This covers brotli over zstd,

@@ -2,9 +2,11 @@
 
 Oct 21, 2026 · Patrick Meenan · Source: [design doc](https://claude.ai/artifact/7MMJZCAHFqqYr2upeYTwAX)
 
+Revised through D-012–D-015. Per-flush encoding is the initial streaming design; exact-length single-meta-block encoding is a parked experiment. The project remains pre-code.
+
 ## Summary
 
-A brotli-format encoder for HTTP servers and CDNs that produces q11-quality output at close to q1 cost by remembering decisions across responses instead of rediscovering them on every stream. Web compression today is stateless per request: every response re-runs match finding, parse decisions and entropy modeling from scratch, and most origins settle for brotli q1 to save CPU. The decoder only requires a valid stream, so every one of those decisions can be cached, pre-trained or shipped alongside a dictionary. Three mechanisms carry the design: a content-addressed parse cache that stores how recurring template chunks were encoded, a pre-trained per-route entropy model that replaces q11's histogram clustering, and a streaming meta-block layout that removes per-flush header overhead for latency-critical documents. Dynamic HTML and JSON are the primary target; producing Compression Dictionary Transport (CDT) variants of static assets is the secondary target, built on the same chunk index.
+A brotli-format encoder for HTTP servers and CDNs that produces q11-quality output at close to q1 cost by remembering decisions across responses instead of rediscovering them on every stream. Web compression today is stateless per request: every response re-runs match finding, parse decisions and entropy modeling from scratch, and most origins settle for brotli q1 to save CPU. The decoder only requires a valid stream, so every one of those decisions can be cached, pre-trained or shipped alongside a dictionary. Three mechanisms carry the design: a content-addressed parse cache that stores how recurring template chunks were encoded, a pre-trained per-route entropy model that replaces q11's histogram clustering, and a streaming meta-block layout that reduces header cost while preserving prompt delivery for latency-critical documents. Dynamic HTML and JSON are the primary target; producing Compression Dictionary Transport (CDT) variants of static assets is the secondary target, built on the same chunk index.
 
 Expected outcome: most of the q1-to-q11 size gap (typically 15 to 25% on HTML) recovered at a small multiple of q1 CPU on template-heavy sites, with the output a standard brotli stream any current browser decodes.
 
@@ -23,19 +25,19 @@ For a server dynamically compressing HTML for one site, this wastes work. Respon
 
 **What CDT covers and what it does not.** CDT lets a response reference bytes from a previous response the client already holds. It does not make the encoder cheaper; a dictionary-compressed q11 variant is a full q11 run with the dictionary attached. And it cannot help a server-only approach reach cross-request bytes without decoder cooperation. The two compose: this design reaches q11-class intra-document and dictionary matching at low cost, and CDT supplies the cross-request bytes.
 
-**Operational context.** Latency-sensitive applications (search, commerce) flush on every application write, and CDNs flush on every read from the origin, so any design that depends on buffering or idle time is a non-starter for documents. Large fleets mean per-instance learning is slow and redundant, and output should be identical across instances for the same input.
+**Operational context.** Latency-sensitive applications (search, commerce) flush on every application write, and CDNs flush on every read from the origin, so any design that depends on buffering or idle time is a non-starter for documents. Large fleets mean per-instance learning is slow and redundant, and output should be identical across instances for the same bytes, logical flush positions, model and options (D-014).
 
 ## Goals and non-goals
 
 **Goals**
 
-- Produce standard brotli streams that any current browser decodes; no decoder changes, no new content-encoding.
+- Produce ordinary RFC 7932 `br` responses and optional negotiated RFC 9841/9842 `dcb` variants, preserving the exact input bytes. No custom formats, client decoder changes or decoded-content padding.
 - Recover most of the q1-to-q11 size gap on dynamic HTML and JSON at a per-byte cost close to q1, with bounded per-flush CPU on latency-critical responses.
 - Work at the HTTP server or CDN layer with no application changes, and get better when the application supplies template hints.
 - Handle both size-known and size-unknown responses, and both streaming-critical and completion-bound responses, with one encoder.
 - Produce CDT dictionary variants of static assets cheaply enough to generate on the first request at full quality.
-- Keep serving independent of learning: a cold cache and generic model must still produce valid, q1-or-better output, and all learning must be sheddable under load.
-- Never let one user's content improve or leak into another user's response through shared state.
+- Keep serving independent of learning: a cold or rejected model selects reference q1 before encoding, under the same window and flush policy. Learning is sheddable without affecting validity; warm-model gains are measured.
+- Train shared artifacts only from approved public sources and eligible spans; exclude private traffic from all learning paths. Literal-only secret slots are a mitigation, not a proof of compression-side-channel resistance.
 
 **Non-goals**
 
@@ -67,7 +69,7 @@ Brotli is the target format because it has the higher ceiling on exactly the con
 | Literal context modeling (64 contexts, context map, block types) | Yes | One literal table per stream | The largest single piece of the q1-to-q11 gap on HTML |
 | Shared window across meta-blocks | Yes | Blocks within a frame | Lets cached chunk commands reference each other and dynamic content in one stream |
 | Predefined zero-cost tables | No | Yes | zstd is cheaper on tiny streams; brotli needs the small-block policy in Streaming |
-| Repeat previous block's tables | No | Yes | Brotli re-declares tables per meta-block; answered by the one-meta-block streaming layout |
+| Repeat previous block's tables | No | Yes | Brotli re-declares tables per meta-block; minimize with sparse tables, then measure an exact-length single-block experiment |
 | External sequence / custom match-finder API | No | Yes (`ZSTD_compressSequences`, sequence producer) | zstd would be easier to prototype on; brotli requires a forked encoder |
 
 A zstd prototype was considered and rejected: it would measure a format that cannot express the dictionary and context-modeling gains, so its numbers would not transfer. The forked-brotli path has a tractable first milestone, since the encoder's command and meta-block writer is separable from its hashers: feed brotli's entropy coder a command list produced elsewhere, and build everything else on that primitive.
@@ -76,7 +78,7 @@ Brotli details relied on throughout:
 
 - A stream is one header (window bits) followed by meta-blocks; each meta-block declares its own block types, context maps and prefix codes, and carries its uncompressed length (MLEN) in its header.
 - Copies are backward distances into a window shared by all meta-blocks; static-dictionary words are distances beyond `max_distance`, which is `min(position, window - 16)` and so position-dependent early in the stream.
-- A CDT dictionary acts as bytes preceding the stream, so dictionary copies are ordinary backward references.
+- A CDT dictionary is an additional Shared Brotli address region outside the rolling window, not ordinary response history. See Dictionaries and CDT for the saturated-window distance formulas (D-012).
 - Uncompressed meta-blocks cost about 3 bytes of header and their bytes still enter the window.
 - The encoder already ships a compile-time hash index of the static dictionary and prepares shared dictionaries once per dictionary; what it never caches is which positions in your content hit them.
 
@@ -104,7 +106,7 @@ flowchart LR
     subgraph learn["Learning: never on the request thread"]
         direction LR
         acc["<b>Accumulators and sketch</b><br/>histograms, chunk frequency,<br/>sizes, predicted vs actual"]
-        upq["<b>Upgrade queue</b><br/>q11 parses for admitted chunks,<br/>in-process, throttled"]
+        upq["<b>Upgrade queue</b><br/>q11 parses for eligible chunks,<br/>offline"]
         fleet["<b>Offline fleet model</b><br/>trains per-route models,<br/>ships a warm cache set"]
     end
     shared -- "reads only" --> hot
@@ -112,7 +114,7 @@ flowchart LR
     final -- "records at end of response" --> learn
 ```
 
-Bytes land in the ring buffer (the window), the chunker cuts content-defined boundaries, each chunk is looked up by prefix and then fingerprint, references are resolved to distances (misses run the fast hasher), and each flush does one counting pass and emits a meta-block. Finalization runs after the last byte and only records. The hot path never writes shared state; the upgrade queue and the offline model do, and the offline model carries most of the gain because it is fleet-wide and ships a warm cache.
+Bytes land in the ring buffer (the window), the chunker cuts content-defined boundaries, each chunk is looked up by prefix and then fingerprint, references are resolved to distances (misses run the fast hasher), and each flush does one counting pass and emits a meta-block. Finalization runs after the last byte and only records. The hot path never writes learned shared state. The offline trainer builds versioned artifacts from eligible public data, and the Worker loads them read-only. Live finalization records bounded aggregate operational counters, not training content (D-013).
 
 ## Parse cache
 
@@ -122,19 +124,19 @@ The parse cache maps a content-addressed chunk of input to the command sequence 
 
 **Cache entry.** Chunk fingerprint plus a command list: literal runs with block-type tags, and copies stored as logical references, not absolute distances or distance short codes:
 
-- Chunk-anchored: (target chunk id, offset, length), strictly contained within `target_chunk` (`offset + length <= len(target_chunk)`). Cross-chunk matches found during training are split at target-chunk boundaries so a dynamic slot inserted between two template chunks never causes a copy to overrun into the wrong bytes; when the target chunks remain contiguous in the current response, the stitcher can coalesce the split copies back into one command. Because the stitcher knows every emitted chunk's output position, if the target chunk is present earlier in this response the distance resolves with no search.
-- Dictionary-anchored: (dictionary id, offset, length) for static-dictionary words (with transform) and CDT dictionary bytes. The logical reference is context-independent and always valid; the stitcher converts it to a concrete wire distance (`max_distance + 1 + word_offset` for static dictionary, `position + cdt_dict_size - offset` for CDT) at the current output position.
+- Chunk-anchored: (target chunk id, offset, length), strictly contained within `target_chunk` (`offset + length <= len(target_chunk)`). Cross-chunk matches found during training are split at target-chunk boundaries so a dynamic slot inserted between two template chunks never causes a copy to overrun into the wrong bytes; when the target chunks remain contiguous in the current response, the stitcher can coalesce the split copies back into one command. Because the stitcher knows every emitted chunk's output position, if the verified target chunk is present earlier and still in the allowed response window, its distance resolves with no search.
+- Dictionary-anchored: (dictionary id, offset, length) for static-dictionary words (with transform) and CDT dictionary bytes. The logical reference is independent of response position when its dictionary identity and slice/transform are valid; the stitcher converts it to a concrete wire distance (`max_distance + cdt_dict_size + 1 + word_id` for static dictionary, `max_distance + cdt_dict_size - offset` for CDT; dictionary size is zero for ordinary `br`) at the current output position.
 - Predicted-distance: the distance observed last time, verified at emit by `memcmp` at that distance and a small neighborhood (about plus or minus 64 bytes). Covers repeated structures whose stride shifts by a few bytes of dynamic data.
 
 Distance short codes (`0..15` against brotli's 4-entry last-distance ring buffer) and 2-byte literal context IDs (`p1`, `p2` from the output window) are resolved during the stitch/flush pass rather than stored in cache entries, since preceding chunks and distances vary across responses (D-010). Unresolvable references degrade to a local search over the gap or to literals. Entries are roughly 20 to 40% of the chunk's size; a site with tens of MB of distinct template bytes is a cache of a few MB.
 
 **Lookup.** A prefix index keyed on the first ~32 bytes after a boundary, verified incrementally as bytes arrive, so a flush that lands mid-chunk still matches its verified prefix and continues into the next flush. A full-chunk fingerprint confirms whole-chunk hits.
 
-**Slots.** A chunk containing a dynamic value never repeats, so with content-defined boundaries alone the template bytes around every slot would never be cached. Two mechanisms recover them: on a prefix hit, extend by `memcmp` to the divergence point, emit the common prefix as a copy, the value as literals, and re-sync the suffix with a local search near the cached neighbor; then, once the same divergence point has been seen N times, store a cut rule ("at a boundary whose prefix hashes to X, also cut at offset Y") so prefix and suffix become admissible chunks of their own. Template hints from the application produce the same cuts directly.
+**Slots.** A chunk containing a dynamic value never repeats, so with content-defined boundaries alone the template bytes around every slot would never be cached. Two mechanisms recover them: on a prefix hit, extend by `memcmp` to the divergence point, reuse the verified prefix's parse commands (copies still need a source in the current response or negotiated dictionary), emit the value as literals, and re-sync the suffix with a local search near the cached neighbor; then, once the same divergence point has been seen N times in eligible public training captures, store a frozen cut rule ("at a boundary whose prefix hashes to X, also cut at offset Y") so prefix and suffix become admissible chunks of their own. Template hints from the application produce the same cuts directly.
 
-**Misses** run a q1-class hasher over the chunk with predicted-distance hints from neighboring hits as first candidates. The chunk is sampled for the learner; the q11-quality parse is computed off the request and inserted so the next request hits. Cached regions are indexed sparsely for the fast hasher rather than hashing every byte.
+**Misses** run a q1-class hasher over the chunk with predicted-distance hints from neighboring hits as first candidates and deterministic limits on candidates/bytes compared (D-014). The offline trainer may compute q11-quality parses of eligible public chunks for the next artifact version; live misses do not export samples or mutate the model. Cached regions are indexed sparsely for the fast hasher rather than hashing every byte.
 
-**Admission** is gated: a chunk enters the shared cache only after being seen across N distinct sessions (see Security and privacy). Eviction is size-capped LRU; content addressing means a deploy's old chunks age out on their own.
+**Admission** requires an approved public source and eligible spans before any cache, model or sample derivation (D-013). Frequency across eligible captures can prioritize useful chunks, but cannot prove content public. The offline builder selects a size-capped warm set; Worker lookups never mutate LRU state. Artifact refreshes retire obsolete chunks.
 
 ## Entropy and modeling state
 
@@ -148,12 +150,12 @@ The expensive modeling decisions are pre-trained per route and loaded at runtime
 - A ladder of table sets at different description budgets (about 10, 30, 80 and 300 bytes) for the small-meta-block fallback.
 - Size and flush-size distributions, used by the streaming layout.
 
-**Built at flush, per meta-block:** two policies apply depending on whether the meta-block's commands are all in hand when its header is emitted (D-010):
+**Built at flush, per meta-block:** the initial per-flush layout has all block commands available before its header; the parked experiment needs a different policy (D-012):
 
-- **Known-block modes (buffered modes and per-flush meta-blocks):** one counting pass over the meta-block's commands with the context map applied, then tables from the real counts smoothed with the prior. Building a 256-symbol Huffman code is microseconds and was never the expensive part. For a tiny meta-block the prior dominates; for a large one the counts dominate; the emitted table is never wrong for the response. Before emitting, the prior is pruned to symbols actually present, since brotli's table description cost grows with the number of nonzero code lengths.
-- **Open-ended one-meta-block streaming mode:** the meta-block header is emitted at the start of the stream before later flushes arrive, and brotli has no End-of-Block symbol to exit a committed `MLEN` early. The emitted tables therefore come directly from the pre-trained priors without pruning, and must satisfy a **completeness invariant**: every literal table (or a reachable fallback block-type table) assigns a nonzero code length (`1..=15`) to all 256 byte values, and the command and distance tables cover a universal basis of insert lengths, copy lengths and distances up to `lgwin` so no later flush can encounter an unencodable symbol.
+- **Known-block modes (buffered modes and per-flush meta-blocks):** one counting pass over the meta-block's commands with the context map applied, then tables from the real counts smoothed with the prior. Building a 256-symbol Huffman code is microseconds and was never the expensive part. For a tiny meta-block the prior dominates; for a large one the counts dominate; the emitted table is valid for the response, but its size benefit must be measured. Before emitting, the prior is pruned to symbols actually present, since brotli's table description cost grows with the number of nonzero code lengths.
+- **Parked exact-length one-meta-block experiment:** the meta-block header is emitted at the start of the stream before later flushes arrive, using an exact, trusted uncompressed length. Brotli has no End-of-Block symbol to exit a committed `MLEN` early; no estimate or padding may substitute for that length. The emitted tables therefore come directly from the pre-trained priors without pruning, and must satisfy a **completeness invariant**: every literal table (or a reachable fallback block-type table) assigns a nonzero code length (`1..=15`) to all 256 byte values, and the command and distance tables cover a universal basis of insert lengths, copy lengths and all reachable response/dictionary distances so no later flush can encounter an unencodable symbol.
 
-**Size policy.** The response size is usually unknown up front, but every entropy decision is made at flush time when the meta-block's content (or the route prior, in one-meta-block mode) is known, so no up-front size is needed. Below about 2 KB of meta-block, collapse to one literal table and no context map, because the map and extra tables cost more to describe than they save. Unencoded `Content-Length`, when present, settles the policy before the first flush.
+**Size policy.** Initial per-flush table decisions use the available block's actual counts, even when total response size is unknown. Below roughly 2 KB, try one literal table without a context map and compare its cost; calibrate this threshold by measurement. Unencoded `Content-Length` may inform policy, but does not supply future counts. Only the parked exact-length experiment commits a table set before future bytes arrive.
 
 **Per-site statistics can beat per-document clustering** on small responses, where per-document histograms are noisy; this is a secondary gain, a few percent at most.
 
@@ -161,53 +163,100 @@ The site's static dictionary usage is also part of the model in the sense that t
 
 ## Streaming and flush handling
 
-Frequent flushes cost nothing on the match side, because the window is shared across meta-blocks, so the parse cache and dictionary matching are unaffected. The whole cost is per-meta-block entropy headers (roughly 0.5 to 1 KB for a full q11-style set, tens of bytes for sparse tables) plus a byte or two of alignment per flush. The primary design removes the header cost entirely; the fallback minimizes it.
+The window survives meta-block boundaries, but flushes can still shorten matches
+and change parses. Measure those effects as well as table descriptions and
+alignment. The initial encoder completes meta-blocks at logical flushes with
+actual lengths. It preserves every decoded byte and never waits for later input
+to finish a requested flush (D-012).
 
-### One meta-block per response (primary)
+### Per-flush meta-blocks (initial design)
 
-The decoder consumes the bit stream incrementally and (to be verified in the brotli decoder source) force-flushes decoded output when it runs out of input mid-meta-block. If so, the encoder emits the meta-block header once at the first flush, with the full pre-trained, complete table set and context map, then streams commands into that one meta-block for the whole response, sending complete bytes at every flush. Literal tables switch via block-switch commands at a few bits each. Per-flush overhead is zero bytes.
+- Count the available block's commands, build pruned prior-smoothed tables and
+  emit its actual MLEN. Split oversized reads into bounded blocks. Empty flushes
+  emit no data block; EOF finalizes the same brotli stream.
+- Compare table-description plus symbol-bit cost against cheap table-ladder
+  entries and uncompressed blocks. Tiny blocks may use uncompressed data;
+  calibrate the roughly 100-byte and 2-KB thresholds rather than hard-code
+  them as demonstrated optima.
+- Close any final literal run at the actual meta-block boundary. Add empty
+  metadata alignment when needed to deliver all flush output as complete bytes
+  (RFC 7932 §11.2); include that overhead in comparisons.
+- Small first flushes use the same bounded policy, so preload hints do not wait
+  for a later write or a large table header.
+- Train per-flush-index tables only when logical flush positions are available
+  from a cooperating origin or synthetic replay. Transport read index is not
+  a stable template signal.
 
-- **MLEN commitment.** The header carries the uncompressed length up front. Commit to a per-route estimate (about the 90th percentile of observed sizes, or capped until cumulative output passes the initial flush threshold on bimodal routes so short error/empty responses do not expand tens of KB of padding in the client). Overflow starts a new meta-block (splitting any command that would cross `MLEN`) and costs one header. For a shortfall of $S$ bytes, since `distance = 1` repeats the preceding byte (which is typically `>` or `}`), $S = 1$ emits one literal newline (`\n`, `0x0A`) and $S \ge 2$ emits one literal `\n` followed by a single copy command of length $S - 1$ at `distance = 1` (about 5–6 bytes on the wire). Using `\n` rather than spaces is safe for HTML, JSON, CSS, JS and line-delimited `application/x-ndjson` (where a trailing line of spaces would fail `JSON.parse`); `text/event-stream` uses the per-flush fallback so padding never triggers SSE event dispatch (D-010). Always set ISLAST=0 and close with the 2-bit empty last meta-block.
-- **Mid-meta-block command termination and byte alignment at flush.** In RFC 7932, every command before `MLEN` is reached encodes both `insert_length` and `copy_length >= 2` in the opcode ahead of its literals; standalone literal-only commands exist only at the exact end of a meta-block (`remaining_len == 0`). Every mid-meta-block flush must therefore end at the completion of a copy (any trailing unmatched bytes that cannot form a 2+ byte window copy or 4+ byte static-dictionary copy remain in the encoder's lookahead buffer until the next flush). Only whole bytes can be sent, so the final command of a flush may straddle a byte boundary and wait in the decoder until the next write. The encoder re-parses the last few bytes of the flush among about ten alternatives (shorter copy plus literals, split copy, regrouped literals), each landing on a different residue mod 8, and picks one that ends on a complete copy at a byte boundary; this succeeds roughly three times in four. Otherwise it splits the final copy so its tail is a 2–4 byte copy (`insert = 0, copy = 2..4`): because literals precede distance bits on the wire, only the tail copy's 2–4 bytes wait for the straddling distance bits in the next flush, never a long copy (D-010).
-- **Small first flush.** Sites that send a few hundred bytes of `<head>` with preload hints first should not wait behind a 1 KB table header. If the first flush is under about 1 KB, emit it as its own small meta-block (uncompressed or sparse tables) and open the committed meta-block at the second flush.
+### Exact-length single-meta-block experiment (parked)
 
-### Per-flush meta-blocks (fallback)
+After M5 establishes the per-flush baseline, experiment only when the exact
+uncompressed length is known before the header. Complete unpruned tables must
+encode every later symbol. Content-Length alone does not provide future
+histograms; use frozen priors or buffer the bytes. Validate the length and
+abort on truncation or surplus input once committed; never fill a shortfall
+with decoded whitespace. Estimated-MLEN padding is rejected (D-012).
 
-- Under about 100 bytes: an uncompressed meta-block (about 3 bytes of header; bytes still enter the window).
-- Quantized, cheap-to-describe tables from the model's ladder, chosen by meta-block size with the cost estimate: description bytes plus counts dotted with code lengths.
-- Tables learned per flush index: flush k of route R looks alike across requests because flush points are template-driven, so its tables can be precomputed.
-- Parse-cache output is mostly long copies, so a 2 KB meta-block carries a dozen commands and few distinct distances; those fit brotli's simple prefix codes (1 to 4 symbols) and the literal table becomes the only real cost.
-- No context map below a couple of KB.
+RFC 7932 commands encode insert/copy lengths before the literals, but this does
+not require every input pause to finish a copy. The reference decoder can expose
+partial literal output before receiving the copy distance (RE-001). Encoding
+future command fields still requires knowing they will be valid: decoder
+partial-output capability does not supply unknown future bytes or matches.
 
-### Zero-latency coalescing
+Any experiment must account for pending command fields, unmatched tails,
+bit alignment and decoder/runtime buffering. Tail-copy splitting and alternate
+parses may help some inputs; neither a universal 2–4-byte bound nor a claimed
+lottery success rate has been established. Test long unmatched tails, secrets,
+short/empty responses, arbitrary fragmentation and EOF at every command phase.
+Chromium, Firefox, WebKit and the Worker edge need delivery measurements, not
+just full-stream round trips. Promotion requires byte identity and the delivery
+and resource targets already set for the per-flush baseline.
 
-Never wait for idle, but never flush twice in the same instant: application write loops issue several writes within microseconds, and a CDN's `read()` from the origin returns TCP-burst-sized pieces. Coalescing writes issued within one event-loop turn (as nginx already does) adds no measurable latency and removes most sub-KB meta-blocks.
+### Logical flushes and transport fragments
+
+The core accepts an ordered byte stream plus explicit logical flush positions.
+Splitting a feed into smaller buffers without changing those positions must
+produce identical output. Search limits count candidates/bytes compared rather
+than wall-clock time (D-014).
+
+The initial Worker flushes each nonempty origin read after processing bounded
+blocks. Those reads reflect transport fragmentation; they do not preserve
+application writes. Same-tick coalescing is parked until its scheduling and
+latency effects are measured. Never wait for idle to collect more document
+bytes. Replay records logical positions separately from transport fragments;
+end-to-end tests use paced origin markers and client arrival times over HTTP/2
+and HTTP/3, without requiring packet or read boundaries to survive.
 
 ## Response modes
 
-The mode is a two-axis decision, not two fixed modes, because the axes come from different signals: whether the size is known up front, and whether partial delivery matters.
+Size availability and whether partial delivery matters are separate signals.
+Neither content type nor cacheability proves that future input is already in
+memory. The initial modes are:
 
-*Two signals pick the mode: size known, and whether partial delivery matters.*
-
-|  | Completion-bound | Streaming-critical |
+| | Completion-bound | Streaming-critical |
 | --- | --- | --- |
-| **Size known** | **Static assets** — q11 at build; CDT variants on demand.<br/>JS, CSS bundles; fonts, SVG, cacheable public HTML | **Buffered document** — rare: real tables, stream bytes out early.<br/>Framework-buffered HTML with unencoded Content-Length |
-| **Size unknown** | **Dynamic API responses** — buffer to a cap, compress once; past cap, stream.<br/>fetch and XHR JSON; generated script, style | **Streaming documents (primary)** — one meta-block, committed MLEN (per-flush for `text/event-stream`).<br/>document, iframe; event-stream, ndjson, chunked text |
+| **Size known** | Buffer only within the configured cap, then compress with actual counts; otherwise per-flush blocks | Per-flush blocks; trusted exact length may later enable the parked single-block experiment |
+| **Size unknown** | Buffer to a byte cap, then compress once at EOF; if the cap is reached, flush accumulated bytes and continue per-flush | Per-flush blocks with actual MLEN; HTML, SSE and ndjson all preserve the original bytes |
 
-The bottom-right cell is the project's primary target and the only one that needs the streaming layout; the other three compress once with real tables.
+`Sec-Fetch-Dest: document` or `iframe`, SSE/ndjson content types and explicit
+origin policy select streaming. Script/style and ordinary fetch JSON are usually
+completion-bound, but content type and request hints are fallible; operator
+route policy can override them. Priority hints affect policy, not knowledge of
+body length or application flush positions.
 
-**Signals for "streaming matters":** Sec-Fetch-Dest `document` and `iframe` are critical-path for every byte. `script` and `style` are completion-bound (CSS blocks render until complete; classic scripts execute on completion). `empty` (fetch/XHR) is completion-bound unless the content type is `text/event-stream`, `application/x-ndjson` or another chunked-text pattern, which are streaming by definition (`text/event-stream` uses the per-flush meta-block layout so committed-MLEN padding never triggers SSE event dispatch). The RFC 9218 `Priority` request header's `incremental` bit states the same thing directly where sent. Non-browser clients fall back to content type plus Accept.
+Only a trusted Content-Length on an unencoded upstream representation, or a body
+already held in full, supplies an exact uncompressed length. A compressed origin
+Content-Length must never become MLEN (D-011); it also does not prove the origin
+buffered its entire response. Knowing length does not reveal histogram counts.
+Cacheability controls output reuse separately and does not convert a live body
+into an available buffer. Private responses never become training inputs.
 
-**Signals for "size known":** `Content-Length` on an unencoded upstream response, or an asset the server holds in full. A surprising share of dynamic HTML arrives from application frameworks already buffered with `Content-Length` set, which puts it in the size-known column while still streaming compressed bytes out. Behind a compressing proxy (such as a Cloudflare Worker) where the origin sends `Content-Encoding: gzip` or `br` and the runtime transparently decompresses the body, the origin's `Content-Length` is the *compressed* length: it still signals that the origin already buffered the response, but must not be used as the uncompressed `MLEN` (D-011).
-
-**Cell notes.**
-
-- Size known, completion-bound: the static-asset case; plain q11 is produced at build time (out of scope) and CDT variants by the dictionary path.
-- Size unknown, streaming: the one-meta-block layout with committed MLEN, byte-aligned flushes and bounded per-flush CPU; misses use the fast hasher with a time cap.
-- Size unknown, completion-bound: buffer to a cap (128 to 256 KB or a few milliseconds), then compress once with real MLEN and real histograms; past the cap, fall through to streaming mode for the remainder. These can run off the request thread with a slightly higher CPU budget.
-- Cacheability cuts across: `Cache-Control: public` with a long max-age moves a response to the static column regardless of origin; `private` or `Set-Cookie` keeps it per-request and tightens shared-cache admission.
-
-**What a mode controls.** One encoder, with the mode affecting exactly four things: when the table header is emitted, where MLEN comes from (actual or committed), whether flushes are byte-aligned eagerly, and which thread runs the work. Keeping it to those four makes mid-response mode changes safe, which the buffer-cap fallthrough needs.
+Use deterministic byte caps for completion-bound buffering. A wrapper may
+cancel for elapsed time, but clock-triggered mode changes are outside the
+byte-determinism contract. Mode changes and cheap continuations happen at
+completed meta-block boundaries; an open block cannot be abandoned and replaced
+by a fresh stream. Worker CPU still runs on the isolate thread; `waitUntil`
+is lifecycle management, not background compute. See architecture.md for the
+commitment and resource contract.
 
 ## Content-aware optimizations and hints
 
@@ -221,10 +270,10 @@ The server and the application know things the compressor currently rediscovers 
 | Request path / route | Per-route model and parse-cache namespace |
 | Available-Dictionary / Use-As-Dictionary | Which prepared dictionary and sidecar to load; dictionary-relative references in the cache |
 | Sec-Fetch-Dest, Priority (RFC 9218) | Streaming-matters axis (see Response modes) |
-| Content-Length | Size-known axis; table policy settled before first flush |
-| Cache-Control, Set-Cookie, Authorization | Cacheability; shared-cache admission tightening for private responses |
+| Content-Length | Exact-length candidate only for an unencoded representation; does not supply future counts |
+| Cache-Control, Set-Cookie, Authorization | Cacheability and exclusion from learning; no-transform also bypasses re-encoding |
 
-**Template hints (optional, from the application):** slot boundaries, so chunks align to slots; slot types (number, timestamp, URL, JSON, base64, free text) mapped to a literal table and a search policy; and secret slots (CSRF tokens, session-bound ids) marked literal-only, never indexed and never used as a match verification target. Secret slots make BREACH-style attacks structurally impossible for those spans rather than mitigated by padding.
+**Template hints (optional, from the application):** slot boundaries, so chunks align to slots; slot types (number, timestamp, URL, JSON, base64, free text) mapped to a literal table and a search policy; and secret slots (CSRF tokens, session-bound ids) marked literal-only, never indexed and never used as a match verification target. This prevents direct matches involving marked spans, but does not isolate table counts, literal contexts or boundary choices. It is not a proof of BREACH resistance (D-013).
 
 **Runtime scanning (no hints needed):**
 
@@ -237,26 +286,65 @@ For JS and CSS specifically (relevant to the CDT path): inline `//# sourceMappin
 
 ## Learning architecture
 
-One rule governs the split: the hot path only reads shared state, the post-stream pass only records, and anything that computes new shared state happens off the request. The compressor's cost per byte is then fixed regardless of what learning is doing, and learning can be shed under load without changing output.
+The hot path reads immutable learned state. Offline computation is independent
+of serving; shedding recording or training must not affect validity. Bounded
+work limits cap search effort, but CPU per byte remains a measured quantity.
+All training inputs first pass the approved-source/span gate (D-013).
 
 | Tier | Runs | Does | Budget |
 | --- | --- | --- | --- |
-| Inline | On the request thread, during compression | Cache and model lookups; hit/miss counts; a frequency-sketch bump per chunk fingerprint (no content stored); per-response throttling of lookups that are not paying off | Zero beyond the compression itself |
-| Post-stream finalization | On the request thread, after the last byte, before the response context is released | Records fingerprint sequence per route; copies raw bytes of chunks that just crossed the admission threshold into the upgrade queue; merges per-context histograms into thread-local route accumulators; records size, flush sizes, predicted-vs-actual MLEN and table cost; samples whole responses (about 1%) for the offline trainer, skipping private responses and secret slots | Tens of microseconds; first thing shed under load |
-| Async upgrade queue | Background thread in the server process, throttled (or offline in the Worker deployment; D-011) | Computes q11-quality parses for admitted chunks against a composite window of the route's preceding admitted chunks plus static/CDT dictionaries, clamping/splitting commands at chunk boundaries so cross-chunk `chunk-anchored` references are found without ever matching into unadmitted user data (D-010); inserts into the parse cache; eviction; periodic table rebuilds from accumulators | A few percent of a core |
-| Offline fleet model | Out of process, fleet-wide | Trains per-route models from samples: context maps, block policies, table ladders, size distributions, admission thresholds; produces a versioned model blob + warm cache set (most frequent admitted chunks parsed against their route's admitted-chunk sequence); aligns with deploys; audits admitted content | Unbounded |
+| Inline | During compression | Read-only cache/model lookup and per-request operational counts; deterministic search limits | Measured bounded work per input byte/block |
+| Post-stream finalization | After EOF or cancellation | Merge bounded aggregate performance counters; release encoder and reservations; no body samples, fingerprints or content histograms from live requests | Shed recording first; cleanup is mandatory |
+| Offline upgrade/trainer | CLI over eligible public captures | Build route histograms and frozen cut rules; parse composite eligible-chunk sequences with q11; split chunk-anchored targets at chunk boundaries; select a bounded warm cache | Off-request |
+| Artifact publication | Offline, fleet-wide | Package model + warm cache + provenance and compatibility metadata; validate before publication | Off-request; versioned immutable blobs |
 
-**Why the fleet model carries most of the gain.** A thousand instances learning on their own converge slowly, duplicate work, and make output depend on which instance served the request. A versioned model blob with a warm cache set means a fresh instance serves q11-quality output on its first request and every instance produces identical output for identical input. In serverless/Worker deployments where isolates must stay deterministic, runtime shared state is strictly immutable per model-blob version and all upgrade parses fold into the offline fleet trainer (D-011).
+A fixed artifact removes live cache learning as a source of output variation.
+Determinism additionally requires identical logical flushes and options, stable
+iteration/tie-breaking, and deterministic work limits. Model metadata includes
+site/route identity, chunker version and encoder/format compatibility. M4 lands
+serialization and loading in both native and wasm before Worker integration.
+Pin one artifact for the entire response; bound overlap during model refresh.
 
-**Deploy alignment.** Templates change on release. Ideally the model is trained against the release before it ships by rendering representative pages in the build; failing that, a hit-rate drop on a route triggers a faster relearn cycle. Content addressing means stale chunks simply stop hitting and age out.
+**Deploy alignment.** Freeze training artifacts and evaluate later public
+captures, including changed templates. Update models as new approved public
+captures become available; never silently train on held-out evaluation data.
+Content-addressed old entries stop hitting, but the offline builder must retire
+them to reclaim space. Retaining stale artifacts is an explicit test slice.
 
-**Finalization is cheap because nothing is copied.** At end-of-response the ring buffer still holds the raw bytes, the chunker has the boundaries and fingerprints, the command stream is resolved, and the last flush's histograms exist. Only admitted-chunk bytes and sampled responses leave the request context.
+**Finalization and sampling.** The ring buffer may already have overwritten
+earlier response bytes. Do not assume the full body exists at EOF, or retain it
+just to sample traffic. Offline corpus derivation creates eligible trainer
+samples under the same gate as histograms, cut rules and cache entries. Live
+Worker finalization records only aggregate operational performance counters.
 
-**Graceful degradation.** With a cold cache and the generic model the encoder is a slightly-better-than-q1 brotli encoder; with a warm cache and a tuned model it is a q11 encoder at q1 cost. Every state between is a monotonic improvement, and finalization, the upgrade queue and model updates can each be turned off without affecting validity.
+**Graceful degradation.** A cold/rejected model selects reference q1 before
+commitment under the configured window and flush policy. With a warm model,
+size and CPU can improve or regress as content changes; report both. Never
+promise monotonic improvement from warming. Once bytes are committed, only a
+valid continuation of the existing stream is allowed (D-014).
 
 ## Dictionaries and CDT
 
-A dictionary is a region of the window that exists before byte zero, so everything the parse cache does with chunk-anchored references works against dictionary chunks too. CDT support is a milestone on the same codebase, not a separate system.
+CDT uses standardized `dcb`, not ordinary `br` with hidden extra bytes.
+Negotiate both `Accept-Encoding: dcb` and `Available-Dictionary`; the response
+carries the RFC 9842 36-byte prefix (magic plus SHA-256 dictionary hash), then
+a Shared Brotli stream. Vary cached responses on Accept-Encoding and
+Available-Dictionary (and Dictionary-ID if it affects selection). Ordinary
+clients remain on `br` or another acceptable representation. Validate dictionary
+identity and eligibility before commitment; apply RFC 9842's server security
+requirements as part of negotiation.
+
+At copy position `p`, define `M = min(p, (1 << lgwin) - 16)` and dictionary
+size `D`. A dictionary copy from zero-based offset `o` uses distance
+`M + D - o`; a built-in static word ID `w` uses `M + D + 1 + w`.
+For ordinary `br`, `D = 0`. The dictionary stays accessible outside the rolling
+window as the response grows. These formulas come from
+[RFC 9841 §3.2](https://www.rfc-editor.org/rfc/rfc9841.html#section-3.2);
+framing and negotiation are specified in
+[RFC 9842](https://www.rfc-editor.org/rfc/rfc9842.html#section-4).
+Test both before and after `M` saturates; unbounded `p` is not a wire-distance
+base after that point. Logical dictionary references remain useful across
+positions, but always resolve through this geometry at emit time (D-012).
 
 ### Static asset variants
 
@@ -264,13 +352,13 @@ The plain q11 variant is produced at build time (out of scope). Dictionary varia
 
 1. **Chunk dedup against the dictionary.** Chunk both once (the sidecar holds the dictionary's index). Runs of identical chunks become single long copies into the dictionary region; for v123 against v120 that resolves 90%+ of bytes with a handful of commands and no search.
 2. **Localized search for changed chunks.** A changed chunk is usually its old self with a few bytes different. Its neighbors say where the old chunk sits in the dictionary, so the search is "look around here," a few comparisons at predicted offsets.
-3. **Parse recovery from the build's `.br` file.** A modified decoder that emits commands instead of bytes recovers q11's intra-file parse, block splits and context maps at decode speed. Because replacing spans with CDT dictionary copies changes the 4-entry last-distance ring buffer and shifts `max_distance` by `+ cdt_dict_size`, the command-emitting decoder resolves all distance short codes (`0..15`) into explicit backward distances and decodes static-dictionary distances (`> max_distance`) into logical `(word_len, word_idx, transform)` references (D-010). Producing the variant is then: replace command spans covering dictionary-matched runs with dictionary copies (a straddling copy is split at the run edge; both halves stay valid if $\ge 2$ bytes, or a 1-byte remainder becomes a literal), optionally try localized dictionary matches inside changed regions, keep everything else, re-resolve static-dictionary offsets and distance short codes, and re-entropy-code. Intra-file copies remain valid because the output bytes are the same regardless of source. Cost is roughly decode plus chunk-hash plus entropy-code, hundreds of MB/s.
+3. **Parse recovery from the build's `.br` file.** The CLI recovers and stores logical parses before serving variants; the serving path reuses this metadata. A modified decoder that emits commands instead of bytes recovers q11's intra-file parse, block splits and context maps at decode speed. Because replacing spans with CDT dictionary copies changes the 4-entry last-distance ring buffer and shifts the static-dictionary distance range by `+ cdt_dict_size` (the ordinary-history `max_distance` itself stays capped), the command-emitting decoder resolves all distance short codes (`0..15`) into explicit backward distances and decodes static-dictionary distances (`> max_distance`) into logical `(word_len, word_idx, transform)` references (D-010). Producing the variant is then: replace command spans covering dictionary-matched runs with dictionary copies (a straddling copy is split at the run edge; both halves stay valid if $\ge 2$ bytes, or a 1-byte remainder becomes a literal), optionally try localized dictionary matches inside changed regions, keep everything else, re-resolve static-dictionary offsets and distance short codes, and re-entropy-code. Intra-file copies remain valid because the output bytes are the same regardless of source. Cost is roughly decode plus chunk-hash plus entropy-code, hundreds of MB/s.
 
 Variants are cached per (asset hash, dictionary hash). The chunk index doubles as a compressibility estimator: the fraction of an asset's chunks present in a candidate dictionary predicts the savings without compressing, which guides which prior versions to retain and which resources a `Use-As-Dictionary` match pattern should cover.
 
 ### Generated site dictionary for documents
 
-The admitted-chunk set from the parse cache is exactly the material for a site dictionary served with `Use-As-Dictionary` for documents, which is the one place a server-only encoder cannot reach cross-request bytes. The learning system produces the dictionary CDT needs, CDT delivers it, and the parse cache stores dictionary-relative references so the streaming encoder gets those matches on the hot path. Because the server controls a generated dictionary's layout: place the most-referenced chunks nearest the end (cheapest distances), keep chunks that co-occur adjacent (predicted-distance search works), and its chunk set is literally the admission list, so cut rules are known at generation time. The admission gate is also the privacy boundary for dictionary contents.
+The admitted-chunk set from the parse cache is exactly the material for a site dictionary served with `Use-As-Dictionary` for documents, which is the one place a server-only encoder cannot reach cross-request bytes. The learning system produces the dictionary CDT needs, CDT delivers it, and the parse cache stores dictionary-relative references so the streaming encoder gets those matches on the hot path. Because the server controls a generated dictionary's layout: place the most-referenced chunks nearest the end (cheapest distances), keep chunks that co-occur adjacent (predicted-distance search works), and its chunk set is literally the admission list, so cut rules are known at generation time. The approved-source/span gate applies to dictionary contents as well as cache entries; repetition alone never authorizes publication (D-013).
 
 ### Dictionary sidecar (computed from the dictionary alone at storage time)
 
@@ -283,7 +371,7 @@ One flat memory-mappable file next to each retained dictionary, versioned by dic
 | Duplicate canonicalization (index only the occurrence nearest the end) | None | Cheapest distance for repeated content |
 | Entropy statistics (64-context literal histograms, command and distance stats from a self-parse) | Small | Prior for responses of the same type |
 | Region classification (base64, JSON-in-string, markup, text) | Small | Search policy for changed chunks next to a region; block-type hints |
-| Window geometry (size; reachable response offset per window setting) | Trivial | lgwin and MLEN decisions without thought |
+| Dictionary geometry (size, offset ranges, capped distance base) | Trivial | Resolve Shared Brotli distances before and after window saturation |
 | Identity and policy (SHA-256, Use-As-Dictionary fields, version stamp) | Trivial | Matching and advertisement |
 | Cut rules (generated dictionaries only) | Small | A hint-free chunker on a CDN reproduces the dictionary's boundaries exactly |
 | Sparse position index (4-byte hash every 8 to 16 bytes), optional | 25 to 50% of dictionary | Search in changed regions with no localizing neighbor; stored for hot dictionaries, computed lazily otherwise |
@@ -296,19 +384,37 @@ Static-versus-previous-version wants coarse chunks (about 4 KB: diffs are sparse
 
 ### Constraints
 
-- The dictionary plus the response must fit the client's maximum window; the caps differ between brotli and zstd paths in browsers and bound how large a pair this works for.
+- For `dcb`, the rolling window is at most 16 MB under RFC 9842 §4; the dictionary stays accessible independently of response length. Dictionary allocation and permitted distances still need decoder-specific resource checks. Do not impose a dictionary-plus-response window-fit rule or transfer zstd geometry to brotli.
 - A variant can only be produced while the full dictionary bytes are retained server-side, so retention of prior versions trades storage against `Available-Dictionary` hit rate.
 - Parse recovery assumes the build's `.br` used a window compatible with the variant stream; otherwise copies beyond the smaller window are re-resolved via the chunk index.
 
 ## Security and privacy
 
-Shared state across requests creates channels that stateless compression does not have, and the design treats the admission gate as the single boundary for all of them.
+Shared artifacts use approved public sources and explicit span eligibility as
+the privacy boundary (D-013). Public crawling is a collection method, not proof
+that every captured token is safe to publish. Raw captures stay local under
+D-007; trainer derivation and exported artifacts require eligibility filtering.
 
-- **Cross-user cache leakage.** A shared parse cache leaks through timing: whether a chunk hits reveals whether some other user's response contained it. Chunks enter the shared cache, the generated dictionary and the offline samples only after being seen across N distinct sessions, so only template content is ever shared. Private responses (`Cache-Control: private`, `Set-Cookie`, `Authorization` on the request) tighten the gate further, and multi-tenant deployments partition caches per tenant.
-- **BREACH-style attacks.** Compressing dynamic HTML containing secrets alongside attacker-influenced input is already a known risk. Secret slots from template hints are literal-only, never indexed and never used as match verification targets, which removes those spans from the attack surface entirely rather than padding around it. Without hints, high-entropy short-token detection applies the same policy heuristically.
-- **Sampling.** Whole-response samples for the offline trainer skip private responses and strip secret slots. Admitted-chunk bytes are the only other content that leaves the request context.
-- **Dictionary contents.** A generated site dictionary is served to every client, so it is built only from admitted chunks and audited offline for anything that looks per-user.
-- **Determinism.** The fleet model makes output identical across instances for identical input, which also means a compressed response cannot be used to infer which instance or cache state served it.
+- **Eligibility.** Approve source/site provenance before deriving shared
+  histograms, cache entries, cut rules or samples. Exclude private/no-store
+  responses, Set-Cookie responses, credentialed requests and known secret spans.
+  Frequency across eligible public captures only ranks usefulness. No N-session
+  count, missing header or entropy classifier proves content public.
+- **Live traffic.** Never export live bodies, fingerprints, content histograms
+  or whole-response samples into training, even when a response lacks private
+  headers. Operational telemetry is bounded aggregate CPU/byte/error counters;
+  it excludes URLs, tokens and content identifiers. Partition learned artifacts
+  by tenant/site. New private-learning scope needs a separate decision.
+- **Secret slots.** Hints force literals and exclude indexing and match targets.
+  High-entropy token detection is an additional heuristic. Literal-only output
+  still affects code lengths, contexts and boundaries, so it is not structural
+  BREACH protection. Private-serving policy must consider these channels and
+  may bypass compression on secret-bearing routes.
+- **Dictionary publication.** Build only from eligible public chunks; audit
+  before serving. Dictionary bytes are public to every permitted client.
+- **Determinism.** Pin immutable artifacts and include logical flushes/options
+  in the contract. This removes mutable learned cache state as a source of
+  variation; it does not hide network timing or isolate resource exhaustion.
 
 ## Decisions log
 
@@ -319,56 +425,79 @@ Shared state across requests creates channels that stateless compression does no
 | Reject precompressed fragment concatenation | Reusable fragments are a few hundred bytes (CDT experience); per-fragment headers cost the same. Cache command sequences stitched into one meta-block instead. |
 | Parse cache references are chunk-anchored, dictionary-anchored or predicted-distance, never absolute | Absolute distances break whenever preceding content changes; anchored references resolve exactly, predictions verify cheaply. |
 | Pre-train modeling decisions; build tables per meta-block from real counts smoothed with a prior | Clustering is the expensive part; Huffman construction is microseconds. Size-unknown responses are handled because tables are chosen at flush. |
-| One meta-block per response for streaming documents, with committed MLEN and padding | Removes per-flush header cost entirely for flush-on-every-write applications. Depends on decoder partial-output behavior (to verify). |
-| Tiny first flush gets its own small meta-block | Preload-hint `<head>` flushes must not wait behind a 1 KB table header. |
-| Two-axis mode selection; mode controls only four switches | Size-known and streaming-matters come from different signals; limiting what a mode touches makes mid-response mode changes safe. |
-| Hot path reads, finalization records, background computes | Fixed per-byte cost; learning sheddable; output independent of learning state. |
-| Offline fleet model with a warm cache set carries most of the gain | Per-instance learning is slow and redundant; a versioned blob gives cold-start quality and cross-instance determinism. |
-| Admission gate (N distinct sessions) is the one privacy boundary | Same gate protects the cache, the generated dictionary and the samples. |
-| Secret slots are literal-only and never indexed | Structural BREACH defense for the spans that matter. |
+| Per-flush meta-blocks with actual MLEN; exact-length single-block experiment parked | Preserve exact bytes and prompt delivery first; no decoded padding or assumed 2–4-byte delay bound (D-012) |
+| Tiny first flush uses a small meta-block | Preload hints must not wait for later origin bytes or a large table header |
+| Size availability and streaming need are separate signals | Counts require available bytes; change modes only at completed blocks and preserve commitment state (D-014) |
+| Hot path reads, finalization records aggregate performance, offline trainer computes | Live traffic cannot bypass the learning gate; CPU is measured under deterministic work limits (D-013/D-014) |
+| Offline fleet model ships a warm cache set in M4 | Avoid per-instance learning; compare cold/warm/stale behavior on held-out captures with matched flushes (D-015) |
+| Approved public sources and eligible spans gate every learned artifact | Repetition is a usefulness heuristic; private traffic never trains shared state (D-013) |
+| Secret slots are literal-only and never indexed | Mitigates direct matching; does not establish table/context noninterference (D-013) |
 | Dictionary metadata lives in a mmap-able sidecar computed from the dictionary alone | Everything the hot path needs is a function of the dictionary bytes; the prepared-dictionary concept in brotli is right but in-memory, hasher-specific and large. |
 | One chunker with multi-resolution levels, not two chunkers | Static wants ~4 KB, documents ~256 bytes; one rolling hash with recorded levels serves both and keeps every index mutually consistent. |
 | Learned cut rules plus prefix extension for dynamic slots | Content-defined boundaries alone never admit the template bytes around a slot. |
 
 ## Open questions and verification list
 
-**To confirm in decoder source (the one-meta-block layout depends on the first two):**
+**Format and runtime verification:**
 
-- [ ] The brotli decoder force-flushes decoded output when it runs out of input mid-meta-block, and Chromium's brotli source stream delivers that partial output to the parser rather than waiting for a meta-block boundary.
-- [ ] Firefox and WebKit decoders behave the same way for partial meta-blocks.
-- [ ] Current browser window caps for brotli and zstd with and without a CDT dictionary, which bound the asset-plus-dictionary pairs the static path can serve.
-- [ ] Trailing-whitespace padding after `</html>` has no observable parser or `readyState` effect beyond the whitespace text node.
+- [x] Reference C decoder can expose partial literals mid-command before the
+  copy distance arrives (RE-001). This establishes no browser delivery guarantee.
+- [ ] Chromium, Firefox and WebKit deliver incremental decoded output to their
+  consumers; record complete browser/runtime versions and paced-marker timings.
+- [ ] Worker manual `br` streaming preserves prompt client delivery over HTTP/2
+  and HTTP/3. Measure markers, not equality of transport chunk boundaries.
+- [ ] M8 Shared Brotli round trips cover window saturation, dictionary boundaries,
+  static words, short codes, dictionary identity and dcb framing/negotiation.
 
 **To settle by measurement:**
 
-- [ ] On a corpus of real responses from two or three templated sites: q1 vs q11 size and CPU, and the fraction of the gap each mechanism recovers (parse cache alone, model alone, both).
-- [ ] Chunk-cache hit rate by route with and without cut rules, and with template hints.
-- [ ] Actual header cost of a full q11-style table set vs the ladder entries, to calibrate the small-meta-block thresholds.
-- [ ] Distribution of flush sizes on a flush-on-every-write server, before and after same-tick coalescing.
-- [ ] Per-flush CPU on documents with the fast-hasher time cap, and p99 added latency.
-- [ ] MLEN estimate accuracy per route (overflow and padding rates).
-- [ ] Byte-alignment lottery success rate and the delayed-byte distribution when it fails.
+- [ ] Held-out q1/q4/q11 size and CPU with matched windows and logical flushes;
+  cache-only, model-only and combined ablations; cold and stale artifacts.
+- [ ] Reusable parse coverage and resolved legal-reference coverage separately,
+  with/without frozen cut rules and with synthetic template hints.
+- [ ] Actual table/header/alignment cost and thresholds for small blocks.
+- [ ] Per-flush CPU, total withheld bytes, added delivery latency and unmatched
+  tails; no unmeasured delay bounds or same-tick coalescing claims.
+- [ ] Failure injection before headers, within a command/block, at boundaries
+  and at EOF, including origin truncation and downstream cancellation.
+- [ ] Concurrent slow-consumer memory peaks including model refresh, JS/wasm
+  copies, allocator growth and stream cleanup against the reserved budget.
+- [ ] Parked single-block experiment: exact-length and complete-table validity,
+  end-to-end delivery and size/CPU gain over the established per-flush baseline.
 
 **Design questions still open:**
 
-- [ ] The right N for admission, and whether it should vary with response privacy signals.
-- [ ] Cache and model namespace granularity: per route, per route-plus-content-type, or per template id when hints are available.
-- [ ] How template hints are conveyed from the application to the server (a header, a trailer, a sidecar API) without putting hint bytes on the wire to the client.
-- [ ] Whether the upgrade queue's q11 parse should use the route's current cost tables or a neutral cost model, given tables drift as the model retrains.
-- [ ] Prior art: memoized LZ encoding specifically. Nothing well-known is in hand; worth a literature and patent search before publishing.
+- [ ] Cache/model namespace below the required tenant/site partition: route,
+  route-plus-content-type or template ID.
+- [ ] Template-hint transport without exposing hint bytes to clients.
+- [ ] Offline q11 parse cost model: current route tables or a neutral model.
+- [ ] Numeric model/pool/stream caps and runtime headroom from the Worker spike.
+- [ ] Public corpus sources, span-exclusion policy and chronological split;
+  usefulness thresholds apply only after eligibility, not across live sessions.
+- [ ] Prior-art and patent search for memoized LZ encoding before publishing.
 
 ## Milestones and measurement plan
 
-Each milestone produces a measurable number, and the first two decide whether the rest is worth building.
+[plan.md](plan.md) is the authoritative milestone ladder; D-015 revises the
+original ordering. M0 still settles the toolchain, public corpus policy and
+Worker/fork spikes. M1 measures reuse potential and matched q1/q4/q11 baselines;
+M2 establishes command injection and byte-preserving per-flush emission; M3
+measures cached parses; M4 adds route training plus versioned artifact loading;
+M5 validates streaming; M6 integrates the proxy; M7 validates fleet freshness
+and rollout. M8/M9 add standardized dcb variants and public site dictionaries.
+Exact-length single-meta-block work is parked after the streaming baseline.
 
-1. **Corpus and baseline.** Collect real responses from two or three templated sites (documents and JSON), with route labels. Measure q1 and q11 size and CPU. This is the yardstick for everything after.
-2. **Command-list injection.** Fork brotli so its entropy coder and meta-block writer accept an externally produced command list, supporting both fast single-table coding and q11 clustered-table coding (as an oracle for M3 before M4's route model lands). Validate by round-tripping q11's own parse. This primitive is what every later milestone hangs off.
-3. **Offline parse cache.** Chunker, cache entries with anchored references, stitcher, q1 hasher for misses. Run the corpus twice; report hit rate and size on the second pass versus q1 and q11 (under both fast tables and q11 oracle tables). Add cut rules and measure the hit-rate change.
-4. **Route model.** Train context maps and priors offline; prior-smoothed tables at flush (and complete unpruned tables for one-meta-block streaming). Report the size gain with and without the parse cache, especially on small responses.
-5. **Streaming layout.** One-meta-block mode with committed MLEN, alignment lottery and small-first-flush policy, after the decoder behavior is confirmed. Measure on a flush-on-every-write replay: per-flush CPU, delayed bytes, padding overhead.
-6. **Server integration.** Mode selection from headers, same-tick coalescing, finalization pass and the upgrade queue inside a real server (Cloudflare Worker compressing proxy per D-004). Measure under load, including shedding.
-7. **Fleet model and warm cache.** Versioned model blob; cold-start quality on a fresh instance; cross-instance determinism check.
-8. **CDT static variants.** Dictionary sidecar, chunk dedup, localized search, parse recovery from `.br`. Measure variant generation time and size against a full q11-with-dictionary run.
-9. **Generated site dictionary.** Build from admitted chunks, serve via `Use-As-Dictionary`, store dictionary-relative references in the cache. Measure document size with and without.
+The first experiment reports a repeatability funnel on later held-out captures:
+(1) cross-response LZ77 and static-dictionary reuse potential, (2) naive ~256 B
+CDC overlap with training chunks, (3) 64/128/256 B and delimiter-biased CDC,
+and (4) prefix/suffix extension with cut rules learned only from training data.
+Do not call cross-response matches a legal ordinary-br size ceiling. M3 follows
+with the fraction of cached commands whose references can actually resolve in
+the current response or negotiated dictionary. Report body duplicates and
+same-corpus warm replay separately from held-out generalization.
 
-The first experiment, before any of this: on the corpus from milestone 1, measure a 4-step repeatability funnel per route: (1) ground-truth cross-response LZ77 + static-dictionary repeatability (the true template ceiling), (2) naive ~256-byte CDC whole-chunk overlap, (3) 64/128/256-byte and delimiter-biased CDC overlap, and (4) ~256-byte CDC with prefix/suffix `memcmp` extension and simulated cut rules (divergences seen $\ge N$ times). That separates how much template repetition exists on the route from how much of the gain comes from whole-chunk hits versus slot/cut-rule recovery, and if the ceiling is low on the target sites the design should change before encoder code is written.
+Freeze artifacts before evaluation, retain a template-change slice, and compare
+size/CPU on identical bytes, windows and logical flushes. Report native and wasm
+separately. The owner sets numerical acceptance targets after M1's baseline and
+before inspecting M3/M4 results; favorable overlap alone is insufficient to
+claim q11-class output near q1 CPU.

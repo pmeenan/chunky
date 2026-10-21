@@ -9,7 +9,7 @@ This is the scope ledger for the M0 planning conversations. It has three tiers:
 - **Open questions**: things that shape architecture and need an answer
   during M0.
 
-Status legend: `confirmed` · `proposed` · `rejected (D-NNN)`
+Status legend: `confirmed` · `proposed` · `parked (D-NNN)` · `rejected (D-NNN)`
 
 Confirmed rows describe *what* is in scope. The design doc holds the *how*, and
 the section to read is named in Notes.
@@ -22,35 +22,36 @@ the section to read is named in Notes.
 | Content-defined multi-resolution chunker (~256 B fine, ~4 KB coarse levels from one rolling hash, with optional delimiter/tag bias) | confirmed | design: Parse cache, Chunker resolution. Parameters are a versioned, deployment-wide constant |
 | Parse cache: chunk fingerprint → commands with strictly chunk-contained `chunk-anchored`, `dictionary-anchored` and `predicted-distance` logical references; prefix index; stitcher resolving distance short codes (`0..15`) and literal contexts (`p1`, `p2`) at emit time | confirmed | design: Parse cache; D-010 |
 | Slot handling: prefix extension to divergence, learned cut rules | confirmed | design: Parse cache → Slots |
-| q1-class fast hasher for misses, with predicted-distance hints and a time cap | confirmed | design: Parse cache → Misses |
+| q1-class fast hasher for misses, with predicted-distance hints and deterministic candidate/byte-comparison caps | confirmed | design: Parse cache → Misses; D-014. Wall-clock checks may cancel a wrapper but cannot change valid output within the determinism contract |
 | Route model: pre-trained context map, block-type policy, priors, table ladder, size distributions | confirmed | design: Entropy and modeling state |
-| Prior-smoothed Huffman tables built per meta-block (pruned for known-block modes; unpruned universal tables for one-meta-block streaming), small-block size policy | confirmed | design: Entropy and modeling state; D-010 |
-| Streaming layout: one meta-block per response with committed MLEN, `\n` + `distance=1` shortfall padding, copy-ending mid-meta-block flushes, byte-alignment lottery (with 2–4 B tail-copy split fallback), small-first-flush | confirmed | design: Streaming; D-010. **Gated on the decoder partial-output verification** (open question 1); `text/event-stream` stays on per-flush fallback |
-| Per-flush meta-block fallback with quantized table ladder | confirmed | design: Streaming → fallback |
+| Prior-smoothed pruned Huffman tables per available meta-block, small-block size policy | confirmed | design: Entropy and modeling state; complete unpruned tables belong to the parked exact-length experiment |
+| Byte-preserving single-meta-block encoding with an exact trusted uncompressed length | parked (D-012) | After M5: complete tables and browser/edge delivery experiments; no initial milestone depends on it; no assumed 2–4 B delay bound |
+| Estimated MLEN with decoded whitespace shortfall padding | rejected (D-012) | Changes input bytes and conflicts with the lossless contract |
+| Per-flush meta-blocks with actual MLEN, small-first-flush policy and quantized table ladder | confirmed | Initial streaming layout, including SSE/ndjson; complete-byte delivery without waiting for later input (D-012) |
 | Two-axis response-mode selection from headers (size known × streaming matters), checking unencoded `Content-Length` | confirmed | design: Response modes; D-011 |
 | Runtime content scanning: base64/data URIs, embedded sublanguages, high-entropy tokens get dedicated block types / tables | confirmed | design: Content-aware optimizations |
 | Template hints: slot boundaries, slot types, secret slots | confirmed | design: Content-aware optimizations. How hints reach the encoder is open question 6 |
-| Admission gate and secret-slot policy | confirmed | D-009 |
-| Cold-cache / generic-model path produces valid q1-or-better output | confirmed | D-008. First-class test configuration |
-| Deterministic output for identical input + identical model/cache version | confirmed | design: Learning architecture, Security → Determinism; D-011 |
-| Demand-grown per-stream window buffers and zero-copy CDT dictionary slices | confirmed | D-011; keeps concurrent streaming requests within the 128 MB Worker isolate limit |
+| Approved public source/span eligibility gate and literal-only secret slots | confirmed | D-013 supersedes D-009. All learned artifacts use the gate; frequency and token detection are heuristics, not privacy proofs |
+| Cold-cache / rejected-model path selects reference q1 with matched window/flush policy | confirmed | D-014. First-class test configuration; warm/stale quality is measured rather than assumed monotonic |
+| Deterministic output for identical bytes, logical flush positions, versions, dictionary and options | confirmed | D-014; different feed fragmentation alone must not change output; Worker transport-read flush schedules may vary |
+| Demand-grown buffers and zero-copy dictionary slices within an isolate-wide reserved pool | confirmed | D-014 extends D-011: reserve worst-case stream capacity before commitment; account for shared state, growth/refresh peaks, JS/wasm copies and headroom |
 
 ## Learning and models
 
 | Feature | Status | Notes |
 | --- | --- | --- |
-| Post-stream finalization: fingerprint sequences, admission-threshold copies, accumulators, sampling | confirmed | design: Learning architecture |
-| Upgrade path: q11-quality parses for admitted chunks against composite admitted-chunk route windows (commands clamped/split at chunk boundaries), computed off-request | confirmed | design: Learning architecture; D-010, D-011 |
-| Offline fleet-model trainer producing a versioned model blob + warm cache set | confirmed | design: Learning architecture. Natural fit for a CLI tool |
-| Versioned on-disk formats for model blobs, cache sets and sidecars, with a header/version check on load | confirmed | Published state between the CLI trainer and the Worker; a version mismatch fails closed to the generic path, never mis-decodes |
+| Live finalization: bounded aggregate performance recording and mandatory resource cleanup | confirmed | D-013/D-014; no bodies, fingerprints, content histograms or whole-response training samples from live traffic |
+| Upgrade path: q11-quality parses for admitted chunks against composite admitted-chunk route windows (commands clamped/split at chunk boundaries), computed off-request | confirmed | design: Learning architecture; D-010/D-013; offline only in the initial deployment |
+| Offline public-data trainer producing a versioned model + warm cache + frozen cut rules | confirmed | Source/span gate applies before all derivation, including samples and statistics; M4 packaging/loading, M7 fleet validation |
+| Versioned on-disk formats with bounded structural/compatibility validation and per-stream artifact pinning | confirmed | M4 implements model/warm-cache native/wasm serialization and loading before Worker integration; mismatches select q1 before commitment (D-014/D-015) |
 
 ## Dictionaries and CDT (secondary target)
 
 | Feature | Status | Notes |
 | --- | --- | --- |
 | Dictionary sidecar (chunk index, prefix index, stats, geometry, cut rules) | confirmed | design: Dictionaries and CDT → sidecar. "mmap" becomes "load a blob" in the Worker |
-| CDT static-asset variants: chunk dedup, localized search, parse recovery from build `.br` via a command-emitting decoder (resolving short codes and static-dict offsets) | confirmed | design: Static asset variants; D-010. The modified decoder is offline-only (D-002) |
-| Generated site dictionary from admitted chunks, served via `Use-As-Dictionary` | confirmed | design: Generated site dictionary |
+| CDT static variants: chunk dedup, localized search, offline build-parse recovery, Shared Brotli encoding and dcb framing/negotiation | confirmed | D-012: capped distance base, external dictionary outside rolling window, 36-byte header and identity, correct Vary and RFC 9842 server rules; independent Shared Brotli verification |
+| Generated site dictionary from eligible approved public chunks, served via Use-As-Dictionary | confirmed | D-013 applies before publication; document references require negotiated dcb, never hidden dictionary references in plain br |
 
 ## CLI tools (build and test)
 
@@ -62,15 +63,15 @@ or optional tools remain proposed or scoped to later milestones.
 | --- | --- | --- |
 | Corpus crawler/collector: logged-out polite crawl, stores bodies + headers + route labels in the local data dir | confirmed | D-007; design: Milestone 1 |
 | Route-labeling tool: cluster crawled URLs into routes (path templates) | confirmed | Third-party crawls carry no route ids (D-007); every per-route metric in M1+ depends on this |
-| Baseline tool: reference q1 and q11 size and CPU per response, per route | confirmed | design: Milestone 1. Cross-check once against C `google/brotli` (D-003) |
-| Chunk-overlap analyzer: 4-step repeatability funnel per route (cross-response LZ77 + static dict ceiling, naive ~256 B CDC, 64/128/256 B + delimiter-biased CDC, and ~256 B CDC with prefix/suffix extension + simulated cut rules) | confirmed | design: "The first experiment". Separates true template repetition from chunker/slot recovery; go/no-go gate |
+| Baseline tool: reference q1/q4/q11 size and CPU per response/route with matched windows and logical flushes | confirmed | D-015; cross-check C google/brotli, report native/wasm separately |
+| Chunk-overlap analyzer: cross-response/static-dict reuse potential, CDC scales/bias, prefix extension and training-only frozen cut rules | confirmed | D-015; held-out later captures, duplicate-body reporting, reusable parse versus legal-reference coverage; overlap is not an ordinary-br size ceiling |
 | Encoder CLI: compress a file or corpus with a given cache/model, report size, CPU and mechanism breakdown | confirmed | Needed for milestones 3 to 5 measurements |
 | Model/cache trainer CLI (the offline fleet model) | confirmed | Same as the Learning row above, surfaced as a tool |
-| Round-trip verifier: decode every output with an independent decoder (brotli-decompressor and the C reference) and byte-compare | confirmed | Makes D-002 mechanical from M2 onward |
-| Stream inspector: disassemble a brotli stream into meta-blocks, commands, table description costs and flush/alignment points | confirmed | Needed to measure header cost, alignment lottery and padding in M4–M5 |
-| Flush replay harness: replay a recorded response as a flush-on-every-write stream with recorded timing | confirmed | Required by design milestone 5 ("flush-on-every-write replay") |
-| Benchmark report generator: one command → a comparable table (vs q1/q11) per corpus snapshot | confirmed | Rule 3 says claims are numbers; keeps M1–M9 tables reproducible |
-| Differential fuzzing / property tests: random inputs and cache states → round-trip must hold | confirmed | Property tests start in M2; full fuzzing in M3/M5 where stitched anchored refs and committed-MLEN padding live |
+| Round-trip verifier: independent decoder plus exact byte comparison | confirmed | C/Rust RFC 7932 decoding for br from M2; independent Shared Brotli decoding with the negotiated dictionary for dcb in M8 |
+| Stream inspector: meta-blocks, commands, description costs and logical flush/alignment points | confirmed | M2 onward; measures per-flush overhead and withheld bytes; no padding policy |
+| Flush replay harness: bytes plus logical flush positions and timing, with transport fragmentation varied independently | confirmed | M5 delivery and determinism tests; public-crawl reads alone do not reveal origin application writes |
+| Benchmark report generator: comparable q1/q4/q11 tables with corpus/split/artifact versions and exact commands | confirmed | D-015; held-out temporal and template-change slices; exact-response warm replay labeled separately |
+| Differential fuzzing / property tests: inputs/cache states/fragmentation and stream failures | confirmed | M2 validity, M3 stitched refs, M5 continuation/abort and flush delivery; dcb geometry in M8 |
 | Sidecar builder CLI for CDT dictionaries | confirmed | Packaging of the confirmed sidecar feature for M8 |
 
 ## Cloudflare Worker (compressing proxy)
@@ -78,67 +79,59 @@ or optional tools remain proposed or scoped to later milestones.
 | Feature | Status | Notes |
 | --- | --- | --- |
 | Worker proxy: fetch from origin, compress eligible responses with the wasm core, return with `encodeBody: "manual"`, strip `Content-Length` and weaken strong `ETag`s | confirmed | D-004, D-011. Prior art: the owner's [dictionary-worker](https://github.com/pmeenan/dictionary-worker) (Apache-2.0); see [architecture.md](architecture.md) |
-| Content negotiation: only send `br` when the client accepts it; `Vary: Accept-Encoding` | confirmed | Correctness requirement, not a scope choice. Prior art reads `request.cf.clientAcceptEncoding` because the Worker may not see the client's original header |
-| Streaming pass-through: compress origin reads as they arrive, emitting flushes without buffering streaming-critical responses | confirmed | design: Streaming, Zero-latency coalescing. Edge behavior is open question 3 |
+| Content negotiation: accept br only with nonzero quality; preserve Vary and bypass ineligible responses | confirmed | Verify original client encodings in Worker; cover HEAD, no-transform, 304/206 and existing encodings; dcb negotiation added in M8 |
+| Streaming delivery: flush available origin-read bytes using actual-length blocks with backpressure/cancellation | confirmed | D-012/D-014; reads are transport fragments, not stable application flush boundaries; paced-marker edge measurements in Q3 |
+| Same-tick origin-read coalescing | parked (D-014) | Needs measured scheduling/delivery effects; initial Worker flushes nonempty reads |
 | Mode selection from request/response headers (Sec-Fetch-Dest, Priority, unencoded Content-Length, Content-Type, Cache-Control) | confirmed | design: Response modes; D-011 |
-| Load immutable versioned model blob + warm cache set at isolate start | confirmed | design: fleet model; D-011 |
-| Safe fallback: on any encoder error, budget overrun or version mismatch, serve plain brotli (reference q1) or pass through uncompressed | confirmed | Keeps the proxy safe while the encoder is experimental |
+| Load immutable model/warm cache, pin per stream and bound refresh overlap | confirmed | Loader lands M4, Worker integration M6, fleet freshness/rollout M7 (D-015) |
+| State-dependent fallback: precommit alternate representation, healthy same-stream continuation, otherwise abort | confirmed | D-014; no fresh compressor or identity suffix after commitment; reserve even q1 fallback memory |
 | Strip origin-supplied template-hint headers before the response reaches the client | confirmed | Lets a cooperating origin pass hints via response headers at zero client wire cost (open question 6) |
-| Shadow / comparison mode: also compute reference q1 size off-path and log the delta | proposed | Optional M6+ diagnostic; gives in-production size numbers without client-visible risk |
-| Debug response header (opt-in) reporting cache hit rate, mode, bytes saved | proposed | Optional M6+ diagnostic; must be off by default (it leaks cache state; D-009) |
-| Metrics via Workers Analytics Engine or logs: hit rate, CPU per response, MLEN overflow/padding rates | proposed | Optional M6+ telemetry for production-side counters |
+| Shadow / comparison mode: also compute reference q1 size off-path and log the delta | proposed | Optional M6+ diagnostic over ephemeral bytes; no training export or retained bodies, and reserve its CPU/memory budget (D-013/D-014) |
+| Debug response header (opt-in) reporting cache hit rate, mode, bytes saved | proposed | Optional M6+ diagnostic; off by default because it exposes learned state; D-013 |
+| Metrics via Workers Analytics Engine or logs: bounded aggregate CPU/byte/error counters | proposed | Optional M6+ destination; excludes URLs, content identifiers and training data (D-013) |
 | Kill switch / per-route enable list | proposed | Optional M6+ operational control |
 | Cache API storage of compressed output for cacheable (`public`) responses | proposed | Optional M6+/M8 optimization (`cache.put` in `waitUntil`) |
 
 ## Open questions (answer during M0)
 
-Riskiest first. Each names the M0 task in [plan.md](plan.md) that answers it.
+Q numbers are stable so plan/architecture references remain meaningful. Named
+fallbacks unblock the initial encoder; only the parked experiment needs Q1.
 
-1. **Do browser decoders deliver partial output mid-meta-block?** The
-   one-meta-block streaming layout depends on Chromium's brotli source stream
-   (and Firefox/WebKit) handing decoded bytes to the parser before a
-   meta-block ends. If not, the fallback layout becomes the primary one. Also
-   in scope: whether trailing-whitespace padding after `</html>` is invisible.
-   *M0 research: decoder source reading.*
-2. **Can rust-brotli's encoder accept an external command list without a deep
-   fork?** Where command generation and meta-block writing separate, how
-   q11's parse can be extracted for round-trip validation, and the fork
-   mechanics (vendored, git dependency, upstreamable patches). *M0 spike: source
-   reading plus a throwaway round-trip.*
-3. **Does Cloudflare's edge preserve flush boundaries for manually-encoded
-   `br` responses?** Timing of bytes reaching the client from a Worker that
-   writes small chunks to a `TransformStream` with `encodeBody: "manual"`.
-   Includes HTTP/2 and HTTP/3 framing and any edge-side buffering. *M0 spike:
-   tiny Worker plus a client-side timing capture.*
-4. **How is the versioned model blob stored and delivered to Worker isolates?**
-   D-011 settles that runtime shared state in an isolate is immutable per model
-   version and upgrade parses fold into the offline trainer (preserving
-   cross-isolate determinism and avoiding Durable Objects/Queues in M1–M7).
-   Still to pick for the M0 architecture draft: how the blob reaches isolates
-   (Static Assets binding as in dictionary-worker, R2, KV, or bundled in the
-   Worker), where `waitUntil` sends telemetry/samples, and what "distinct
-   sessions" means for the admission gate without storing user identifiers.
-   *M0: architecture draft.*
-5. **Is the per-request CPU budget enough?** Workers Paid defaults to 30 s
-   CPU per request, Free to 10 ms. We need wasm encoder throughput (wasm is
-   slower than native) at q1-class and cache-hit paths on the corpus, and
-   whether the Free plan is in or out of scope. *Measured in M1 once the wasm
-   build exists.*
-6. **How do template hints reach the encoder?** For the proxy deployment, an
-   origin response header or trailer that the Worker strips is a candidate.
-   For third-party crawl data there are no hints at all. *M0 triage; decides
-   whether the hint path is measurable before a cooperating origin exists.*
-7. **Worker shell: thin JS shell + wasm-bindgen core, or all-Rust
-   `workers-rs`?** dictionary-worker used a JS shell around emscripten wasm,
-   with a `TransformStream`, `waitUntil` and lazy isolate-global init started
-   in parallel with the origin fetch. That shape is proven for this exact
-   streaming job. workers-rs keeps everything in Rust but adds a layer between
-   us and the stream APIs we need to control flush timing. *M0: decide with
-   the spike for question 3.*
-8. **Which sites, how many responses per route, and how routes are labeled.**
-   Corpus composition (documents vs JSON, two or three templated sites per the
-   design), crawl politeness and storage format. *M0 triage, then M1 tooling.*
-9. **Design-doc open questions that can ride along:** admission N and its
-   privacy variation, cache/model namespace granularity, upgrade-parse cost
-   model (current vs neutral tables), prior-art and patent search. These don't
-   block M1.
+1. **Do browsers deliver partial decoded output mid-meta-block?** The C decoder
+   exposes partial literals (RE-001); Chromium/Firefox/WebKit parser delivery
+   remains unverified. Park this research with the exact-length single-block
+   experiment after M5. Initial per-flush blocks need their own delivery checks;
+   decoded whitespace padding is rejected, not a browser-compatibility question.
+2. **Can rust-brotli accept external commands without a deep fork?** Inspect
+   generation/writer separation, capture/reinject q11 and pick fork packaging.
+   *M0 source/round-trip spike.*
+3. **Does the Worker edge deliver manually encoded per-flush br promptly?**
+   Use paced origin markers and client arrival times over HTTP/2 and HTTP/3.
+   Record arbitrary read fragmentation and JS/wasm transfer overhead; do not
+   require transport chunk boundaries to survive. *M0 Worker spike.*
+4. **How are immutable blobs delivered within a bounded memory budget?**
+   Choose bundled blobs, Static Assets, R2 or KV; reserve loading/refresh peaks,
+   pin versions per response and name numeric stream/pool caps and headroom.
+   Select an aggregate-only telemetry destination. M4 implements the loader;
+   live learning and distinct-session identities are unnecessary (D-013).
+   *M0 architecture choices and spike measurements.*
+5. **Is wasm CPU sufficient?** Measure reference and later cache-hit paths on
+   the corpus; select a Workers plan and check its current caps. Include
+   per-flush CPU, cancellation and JS/wasm overhead. Hard runtime termination
+   is not a recoverable fallback promise. *M1 baseline, M5/M6 validation.*
+6. **How do template hints reach the encoder?** An origin header or other
+   interface must be stripped before any outgoing response, including bypass.
+   Third-party crawls have no hints, so evaluate with synthetic/cooperating
+   origins. Literal-only secret hints do not prove table/context isolation.
+   *M0 triage; D-013.*
+7. **Worker shell: thin JS plus wasm or workers-rs?** Use Q3 measurements to
+   choose the stream/cancellation and buffer-transfer interface. `waitUntil`
+   manages lifecycle, not a background CPU thread. *M0 Worker spike.*
+8. **Which approved public sites and capture splits?** Pick sites, politeness,
+   response counts, route labels, provenance and source/span exclusions. Name
+   chronological training/tuning/evaluation slices, duplicate-body reporting
+   and a template-change slice. *M0 policy, M1 tooling; D-013/D-015.*
+9. **Questions that can ride along:** usefulness-frequency thresholds on
+   eligible public captures, route/type namespace within tenant/site partition,
+   upgrade-parse cost model and prior-art/patent search. Private learning is
+   excluded; it cannot be enabled by merely choosing an admission N.

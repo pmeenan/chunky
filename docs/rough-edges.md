@@ -34,4 +34,29 @@ responses, and weaken strong `ETag`s).
 
 ---
 
-*(no findings yet)*
+## RE-001: Partial literal output does not require a completed copy  (2026-10-21, status: worked-around)
+
+**Environment.** Local `libbrotlidec.so.1`, `BrotliDecoderVersion() = 0x1001000`.
+Rechecked during the design revision with the streaming C API via Python ctypes.
+
+**Repro.** The complete RFC 7932 stream, in hex, is
+`70000000549858c052504475`. It declares an 8-byte meta-block and one command
+with insert length 6, copy length 2 and distance 2; literals are `ababab`.
+Feed the first 11 bytes to `BrotliDecoderDecompressStream` with sufficient output
+space: status is `NEEDS_MORE_INPUT` and output is `aba`. Feed the final byte:
+status is `SUCCESS` and output is `babab`, giving exactly `abababab` in total.
+The distance begins at bit 91, after the first 88 supplied bits, so the initial
+output precedes completion of both the literal run and the copy distance.
+
+**Observed vs expected.** D-010 incorrectly inferred that every mid-meta-block
+input pause must complete a copy. The decoder can expose literals mid-command;
+the command's copy-length field appearing first does not prevent that output.
+The [reference decoder](https://github.com/google/brotli/blob/master/c/dec/decode.c)
+handles pending literal/distance states and pushes available output when input
+runs out. D-012 corrects the invariant.
+
+**Impact.** Measure pending fields, unmatched input tails and alignment together;
+a tail-copy split does not establish a universal 2–4-byte delay bound. This
+probe establishes C-decoder behavior only. Browser parser delivery and the
+Worker edge still need independent timing measurements. Initial streaming uses
+actual-length per-flush meta-blocks without decoded padding.

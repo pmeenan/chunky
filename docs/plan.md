@@ -1,113 +1,183 @@
 # Plan
 
-**This is a living document.** Milestones will be re-scoped, re-ordered, split,
-or added as planning conversations and findings come in. That churn is
-expected; what is *not* allowed is silent change. Scope changes get a
-decision-log entry. Progress is reflected here by checking boxes and updating
-status lines as work lands.
-
-Check a box only when the item is done and verified. Partially done items stay
-unchecked, optionally with a note.
-
-**Status legend:** `pending` · `in progress` · `done` · `parked`
+This is a living document. Record changes to load-bearing scope in decisions.md;
+routine implementation choices do not need entries. Check a box only when the
+item is done and verified. Status: `pending` · `in progress` · `done` · `parked`.
 
 ## M0: Plan the plan  `in progress`
 
-Goal: turn [design.md](design.md) and the kickoff choices into a settled
-feature matrix, architecture and milestone ladder. This happens through
-planning conversations with the project owner, plus targeted research and
-spikes where a decision needs evidence.
+Goal: settle the feature matrix, architecture and build sequence with the owner.
+D-012–D-015 incorporate the design review: exact bytes, approved public learning,
+explicit runtime contracts and held-out measurement. No encoder code exists yet.
 
-- [x] Repo scaffolding for the AI-directed workflow (this scaffold).
-- [ ] Feature triage: walk [features.md](features.md) with the owner. Promote
-      or reject every `proposed` row, answer the open questions, and record
-      significant calls in decisions.md.
-- [ ] Research (open Q1): read the brotli decoder sources (google/brotli
-      `dec/`, Chromium's brotli source stream, Firefox and WebKit content
-      decoding) for partial-output behavior mid-meta-block, and for the
-      trailing-whitespace padding question. Output: a short findings note plus
-      a D-entry confirming or demoting the one-meta-block layout.
-- [ ] Research: current browser brotli window caps with and without a CDT
-      dictionary (design verification list). Check current sources, not
-      memory.
-- [ ] Spike (open Q2): rust-brotli encoder structure. Find where command
-      generation and meta-block writing split, and whether a q11 parse can be
-      captured and re-injected. Output: fork-mechanics recommendation.
-- [ ] Spike (open Q3 + Q7): a throwaway Worker that streams small
-      manually-encoded `br` flushes (reference encoder, timed writes) to a
-      client capturing arrival times over HTTP/2 and HTTP/3. Output: does the
-      edge preserve flush boundaries; JS shell vs workers-rs recommendation.
-      Reuse dictionary-worker's shape.
-- [ ] Corpus plan (open Q8 in features.md): pick two or three public
-      templated sites, a crawl politeness policy, target responses per route,
-      and the on-disk corpus format.
-- [ ] First full draft of [architecture.md](architecture.md), including
-      Workers state placement (open Q4).
-- [ ] Toolchain decisions: Rust edition/MSRV, workspace layout, wasm build
-      path (wasm-bindgen / workers-rs, wrangler), test stack, fmt/clippy
-      settings, CI (or local-only), license audit (`cargo-deny`). Record in
-      decisions.md.
-- [ ] Rewrite the provisional ladder below into real milestones with exit
-      criteria.
+- [x] Repo scaffolding for the AI-directed workflow.
+- [x] Revise the design and milestone scopes to address the review findings.
+- [x] Verify that the reference C decoder can return partial literal output
+      before a command's copy distance arrives (RE-001); no browser claim implied.
+- [ ] Feature triage: resolve the remaining proposed rows in features.md with
+      the owner. Parked single-block research does not block the initial encoder.
+- [ ] Spike (Q2): inspect rust-brotli command generation/meta-block separation;
+      capture and reinject a q11 parse; choose fork mechanics.
+- [ ] Spike (Q3 + Q7): manually encoded per-flush `br` from a tiny Worker,
+      paced origin markers and client arrival captures over HTTP/2 and HTTP/3.
+      Measure delivery, origin-read fragmentation and JS/wasm copy overhead;
+      recommend JS shell or workers-rs. Do not require transport chunk boundaries
+      to survive. Use the result to name initial resource budgets and headroom.
+- [ ] Corpus policy (Q8): choose two or three approved public templated sites,
+      crawl politeness, eligible spans, responses per route and corpus format.
+      Record capture times, body hashes and route labels; name chronological
+      training/tuning/evaluation slices and a template-change slice.
+- [ ] Architecture completion (Q4): choose blob delivery/storage, aggregate-only
+      telemetry destination, numeric model/stream/pool caps and the commitment
+      interface. architecture.md records the required contracts, not measured limits.
+- [ ] Toolchain: edition/MSRV, workspace/fork layout, wasm build path, test stack,
+      fmt/clippy, local checks or CI, and permissive-license audit.
 
-**Exit criteria:** the owner has walked features.md and says the plan is good
-enough to build from. The architecture-blocking open questions (Q1 to Q4) are
-answered or have a named fallback. The toolchain is decided, and M1+
-milestones have scopes. M0 is a conversation, not a phase: it exits on the
-owner's call, not on a checklist reaching zero.
+**Exit:** the owner says the plan is ready to build; Q2–Q4 and toolchain/corpus
+choices have answers or named fallbacks. Q1's single-block browser research is
+parked; the initial fallback is the accepted per-flush design. M0 remains open
+until that owner call; this revision does not claim the spikes are complete.
 
-## Provisional milestone ladder  `pending (to be rewritten in M0)`
+## Milestone ladder  `pending (scoped; M0 choices remain)`
 
-Adapted from design.md's milestone list and ordered by risk: measure the
-opportunity and prove the substrate before building breadth. This is a sketch
-only, so do not start work from these entries. They freely reference
-`proposed` features.md rows, and nothing here pre-empts the M0 triage.
+All reported results name corpus/split/artifact versions and exact commands.
+Model/cache/cut rules are frozen before evaluation, with no evaluation-driven
+updates. Same-response warm replay is diagnostic, separate from generalization.
 
-- **M1: Workspace, corpus and the go/no-go repeatability funnel.** Cargo
-  workspace, fmt/clippy/test, license audit. Crawler, route-labeling tool and
-  corpus format; baseline (`q1`/`q11` size + CPU, cross-checked once against C
-  brotli); benchmark report generator; and the chunk-overlap analyzer reporting
-  the 4-step repeatability funnel per route (cross-response LZ77 + static-dict
-  ceiling, naive ~256 B CDC, 64/128/256 B + delimiter-biased CDC, and ~256 B
-  CDC with prefix/suffix extension + simulated cut rules). Plus a wasm32 build
-  of the reference encoder running in a minimal Worker so the substrate risk
-  (wasm throughput vs CPU budget, open Q5) is measured early. **Exit:**
-  repeatability funnel numbers per route on the corpus, wasm baseline CPU, and
-  an owner go / change-the-design call.
-- **M2: Command-list injection.** Forked encoder accepts an external command
-  list, supporting both fast single-table coding and `q11` clustered-table
-  coding (as an offline oracle for M3 before M4 lands). Validate by
-  round-tripping `q11`'s own parse to byte-identical size. Round-trip verifier,
-  stream inspector and initial property tests land here because every later
-  milestone measures and validates with them.
-- **M3: Offline parse cache.** Multi-resolution chunker, cache entries with
-  strictly chunk-contained `chunk-anchored`, `dictionary-anchored` and
-  `predicted-distance` references (D-010), stitcher resolving distance short
-  codes (`0..15`) and literal contexts at emit time, fast hasher for misses,
-  composite admitted-chunk upgrade parses, then cut rules. Two-pass corpus run:
-  hit rate and size vs `q1`/`q11` (under both fast tables and `q11` oracle
-  tables), plus differential fuzzing of stitched references.
-- **M4: Route model.** Offline training of context maps and priors;
-  prior-smoothed pruned tables for known-block modes and complete unpruned
-  tables for one-meta-block streaming (D-010); small-block policy. Size and CPU
-  ablation with and without the parse cache.
-- **M5: Streaming layout.** One-meta-block mode (if Q1 confirms) or the
-  per-flush fallback, with committed MLEN, `\n` + `distance=1` shortfall
-  padding, copy-ending mid-meta-block flushes, byte-alignment lottery (with
-  2–4 B tail-copy split fallback) and small-first-flush (D-010). Measured on
-  the flush replay harness.
-- **M6: Worker compressing proxy.** wasm core in the Worker with demand-grown
-  window buffers, mode selection (checking unencoded `Content-Length`),
-  `Content-Length` stripping and `ETag` weakening, same-tick coalescing,
-  finalization, immutable versioned model blob loading, template-hint header
-  stripping and safe fallback (D-011). Measured against a real origin: CPU per
-  response, memory footprint, delayed bytes, size.
-- **M7: Fleet model and warm cache.** Versioned blob (`chunky-formats`) from
-  the trainer CLI, cold-start quality on a fresh isolate, cross-isolate and
-  native-vs-wasm determinism check.
-- **M8: CDT static variants.** Sidecar builder and zero-copy dictionary
-  loading, chunk dedup, localized search, parse recovery from `.br` (resolving
-  distance short codes and static-dict offsets; D-010). Generation time and
-  size vs full `q11`-with-dictionary.
-- **M9: Generated site dictionary.** Built from admitted chunks, served via
-  `Use-As-Dictionary` from the Worker; dictionary-relative cache references.
+### M1: Workspace, corpus and opportunity measurement  `pending`
+
+Cargo workspace, native/wasm reference builds, fmt/clippy/test and license audit.
+Crawler, route labels and corpus manifests implement the approved public-data
+policy. Record time, body identity and logical-flush provenance separately from
+transport fragments. Train/tune on earlier captures and evaluate later ones;
+label naturally repeated bodies and obtain or synthesize a template change.
+
+Measure reference q1/q4/q11 size and CPU with equal windows and flush positions,
+cross-checking C brotli. Report buffered and streaming cases separately. The
+repeatability funnel measures cross-response LZ77/static-dictionary potential,
+~256 B CDC, 64/128/256 B and delimiter bias, then prefix/suffix extension with
+training-only frozen cut rules. It is not a legal ordinary-br size ceiling.
+Run a minimal reference-q1 wasm Worker to measure CPU and resource overhead.
+
+**Exit:** reproducible baseline/funnel reports and wasm measurements. The owner
+makes a go/change call and records numerical size-gap recovery, CPU, latency and
+memory targets before M3/M4 evaluation. No performance promise is inferred from
+chunk overlap alone.
+
+### M2: Command injection and byte-preserving per-flush output  `pending`
+
+Forked encoder accepts external commands with fast and q11 oracle table modes.
+Capture and reinject q11 parses; verify byte identity on decode and explain any
+size difference from the original parse/table arrangement. Add actual-MLEN
+per-flush blocks, bounded block splitting, final literal runs, alignment and EOF.
+The independent round-trip verifier, inspector and property tests land here.
+
+**Exit:** every fixture decodes exactly with C brotli and the Rust reference;
+cover empty/tiny blocks, unmatched tails, overlapping copies, literal contexts,
+short-code ring updates and meta-block boundaries. A fixed logical flush sequence
+produces identical output under different feed fragmentation. Initial reference
+q1 and external-command paths both pass the same validity/flush checks.
+
+### M3: Offline parse cache on held-out responses  `pending`
+
+Chunker, bounded eligible-public warm set, anchored references, stitcher,
+q1-class miss hasher with deterministic candidate/byte-comparison caps, and
+training-only frozen cut rules. Train composite windows of eligible chunks;
+chunk-anchored targets never cross their target chunk boundary. Resolve short
+codes and contexts at emit time. Cold/rejected artifacts use reference q1.
+
+**Exit:** held-out reusable-parse coverage, successfully resolved legal-reference
+coverage, size and CPU versus q1/q4/q11 under fast and oracle tables. Report
+same-response warm replay separately. Exercise absent/out-of-window targets,
+changed templates and adversarial cache states through differential fuzzing;
+no invalid bytes or learning-gate bypasses.
+
+### M4: Route models and versioned artifact loading  `pending`
+
+Offline context maps, priors, pruned tables and small-block policy. Implement
+`chunky-formats` serialization and validated native/wasm loading for the model
+and warm cache, including site/route, chunker and compatibility metadata and
+public-data provenance. Pin one artifact per stream. Bad/incompatible artifacts
+select the cold path before commitment. Complete single-block tables are deferred
+with the parked experiment.
+
+**Exit:** size/CPU ablations for cache alone, model alone and both on frozen
+held-out data; cold and stale-model regressions reported by route against the
+M1 targets. Matching native/wasm results for identical logical inputs/options;
+loader rejects invalid lengths/offsets/versions within a bounded memory budget.
+The Worker can use these artifacts without waiting for M7.
+
+### M5: Streaming delivery and continuation  `pending`
+
+Replay per-flush blocks with small-first-flush policy, complete-byte delivery,
+backpressure and cancellation. Explicit logical positions drive replay; vary
+transport fragmentation independently. Establish valid continuation with
+uncompressed blocks in the same stream at healthy completed-block boundaries.
+
+**Exit:** exact round trips and measured total withheld bytes, per-flush CPU and
+client delivery latency; include long unmatched tails, empty/short responses,
+SSE/ndjson and slow consumers. Inject faults before commitment, within commands,
+at block boundaries and EOF. Recoverable cases continue the same stream;
+unrecoverable ones abort instead of signaling valid EOF. Record browser/runtime
+versions and verify the per-flush path over the Worker edge. Single-block work
+is not required to exit M5.
+
+### M6: Worker compressing proxy and aggregate resource bounds  `pending`
+
+Integrate wasm with the chosen shell, immutable M4 artifacts and aggregate-only
+telemetry. Correct negotiation and response headers, per-read logical flushing,
+bounded completion buffering, and explicit precommit/streaming/completed/aborted
+states. Reserve each stream's allowed worst-case allocation before commitment;
+account for shared blobs, refresh/growth peaks, JS/wasm transfers and headroom.
+Reference-q1 fallback also needs a reservation. Apply backpressure and cancel
+origin reads on downstream cancellation; cleanup is mandatory, recording is shed.
+
+**Exit:** real-origin size/CPU/memory/latency against the M1 targets; fault
+injection and concurrent long-lived slow-consumer tests remain within budget,
+including model refresh. Exhausted capacity rejects compression before commitment
+with an acceptable alternate representation or an error. Cover `br;q=0`, HEAD,
+no-transform, 304/206, existing encodings, Vary and ETag behavior. Never switch to
+identity bytes or a fresh compressor after committing a br response.
+
+### M7: Fleet rollout and model freshness  `pending`
+
+Use the M4 loader to validate versioned publication, bounded refresh/rollback,
+fresh isolates, stale models and template changes. No live private-traffic learning.
+
+**Exit:** native/wasm/cross-isolate determinism under identical bytes, logical
+flush positions and options; size/CPU for fresh versus stale artifacts; pinned
+in-flight versions and bounded update overlap. Different transport-derived flush
+schedules may produce different bytes and are labeled accordingly.
+
+### M8: Standard CDT static variants  `pending`
+
+Sidecars, chunk dedup, localized search and offline parse recovery from build
+`.br` with explicit distances/static-word references. Add Shared Brotli emission
+and RFC 9842 dcb framing, dictionary identity, negotiation, Vary and server security
+rules. Use capped `max_distance` geometry, not uncapped response position.
+
+**Exit:** independent Shared Brotli decode equals input; tests exercise references
+before/after window saturation, dictionary start/end, short codes and built-in
+static words. Plain-br clients never receive external-dictionary references.
+Measure generation time and size against full q11-with-dictionary, including
+framing bytes and dictionary memory. Dictionary plus response need not fit the
+rolling window.
+
+### M9: Generated public site dictionary  `pending`
+
+Build from eligible approved public chunks, audit before publication and serve
+with `Use-As-Dictionary`. Store logical dictionary-relative cache references.
+
+**Exit:** provenance/eligibility checks cover every published chunk; negotiated
+dcb round trips and plain-br fallback pass. Measure document size with/without
+CDT on held-out responses, including dictionary acquisition cost separately.
+
+## Exact-length single-meta-block experiment  `parked (after M5)`
+
+Only exact, trusted uncompressed lengths; never predicted MLEN or decoded padding.
+Complete tables encode all reachable symbols/distances. Investigate partial
+literals/copies, pending command fields and alignment without asserting a 2–4 B
+delay bound. Browser and Worker marker delivery, EOF mismatch, unmatched tails,
+byte identity and resource usage must meet the established per-flush targets.
+Promote only if held-out size/CPU benefits justify the complexity; no initial
+milestone depends on success.
