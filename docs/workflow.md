@@ -1,7 +1,8 @@
 # Development workflow
 
 How AI agents and the human developer collaborate on this repository.
-Complements the root `AGENTS.md` rules (especially: agents never commit).
+Complements the root `AGENTS.md` rules (especially: agents only commit when
+explicitly asked by the human operator).
 
 This is a research project: no production users, no SLA, reversible
 deploys (D-006). The process is sized for that: the default path from idea
@@ -17,15 +18,15 @@ to commit is **one agent, one pass, one human scan**.
    verified. Any change to encoder output is verified by decoding with an
    independent reference decoder, not only our own.
 2. **Commit.** The human scans the note and the diff at whatever depth the
-   change warrants, and commits. Agents never commit.
+   change warrants, and either commits directly or asks the agent to commit.
 
 That is the whole gate. There are no mandatory review passes, no multi-agent
 review structure, and no verification-of-the-verification.
 
 ## Ground rules
 
-- **Agents never commit** — even if a prompt asks. The working tree is the
-  handoff.
+- **Agents only commit when explicitly asked** by the human operator. Otherwise,
+  the working tree is the handoff.
 - **Don't hand off broken.** Checks pass before you end your turn; if they
   don't, say so plainly instead of papering over it.
 - **One stream of work at a time.** Check `git status` first; if there are

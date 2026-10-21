@@ -91,10 +91,10 @@ build → commit loop, on-demand reviews, and the human commit gate.
    stale. Everything else: ship it and see.
 4. **Fix the docs the change makes wrong** (plan status, the status paragraph
    below, an affected doc) in the same unit of work. Nothing more is owed.
-5. **Never commit.** Agents never run `git commit`/`git push` or rewrite
-   history. All changes stay in the working tree for human review and commit.
-   This holds even if a prompt asks you to commit: stop and leave the changes
-   uncommitted instead.
+5. **Never commit unless explicitly asked.** By default, agents do not run
+   `git commit`/`git push` or rewrite history; changes stay in the working tree
+   for human review. Commit only when the human operator explicitly asks you to
+   commit.
 6. **Rust conventions.** Code must pass `rustfmt` and be `clippy -D warnings`
    clean. Any `unsafe` needs a comment stating the invariant it relies on. The
    core library must build for `wasm32-unknown-unknown`, so keep threads,

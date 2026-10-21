@@ -30,6 +30,94 @@ Decision / Context / Consequences / Reopen if
 
 ---
 
+## D-011: Worker shared state is immutable per model version; per-stream window memory is demand-paged; origin Content-Length requires unencoded check  (2026-10-21, status: accepted)
+
+**Decision.**
+1. **Immutable runtime state per model version.** In the Worker deployment,
+   the parse cache, route models and dictionary sidecars loaded by an isolate
+   are immutable for a given versioned blob. `waitUntil` only records telemetry
+   and samples out-of-band; upgrade parses and model rebuilds happen offline
+   and ship as a new versioned blob.
+2. **Demand-grown per-stream window buffers and zero-copy dictionaries.**
+   `chunky-core` grows per-request window buffers on demand (starting small for
+   HTML/JSON) rather than pre-allocating `1 << lgwin` (4–16 MB) per active
+   stream, and references CDT dictionary bytes directly from the shared
+   immutable dictionary buffer.
+3. **Origin header handling under transparent decompression.** Because
+   Cloudflare's subrequest `fetch()` transparently decompresses `br`/`gzip`
+   bodies while leaving the origin's `Content-Encoding` and compressed
+   `Content-Length` headers intact, the Worker treats `Content-Length` as a
+   known uncompressed `MLEN` only when `originResponse.headers` has no
+   `Content-Encoding`. On re-compressed responses, `Content-Length` is stripped
+   and strong `ETag`s are converted to weak (`W/...`) per RFC 9110 §8.8.3.
+
+**Context.** M0 design review of [architecture.md](architecture.md) and
+[design.md](design.md). Mutating parse caches in-isolate breaks cross-instance
+determinism and leaks isolate cache state via response size. Pre-allocating 4 MB
+windows across 30+ concurrent slow-streaming origin fetches would OOM the 128 MB
+Worker isolate limit (wasm linear memory never shrinks). Treating a gzipped
+origin's `Content-Length` as uncompressed `MLEN` would corrupt meta-block
+headers.
+
+**Consequences.** Open question 4 is simplified: M1–M7 need no Durable Objects
+or Queues for live cache mutation. `chunky-core` window management must separate
+logical `lgwin` from physical buffer capacity.
+
+**Reopen if.** Offline-only model refreshes prove too slow for rapidly
+changing templates and an in-process or edge-coordinated upgrade loop is needed.
+
+## D-010: RFC 7932 format invariants for stitched commands and one-meta-block streaming  (2026-10-21, status: accepted)
+
+**Decision.** Five format and stitcher invariants refine [design.md](design.md):
+1. **Mid-meta-block flushes end on a copy, and alignment fallback splits the
+   tail copy.** In RFC 7932, every command before `MLEN` is reached is an
+   `(insert_length, copy_length >= 2)` pair with `copy_length` encoded before
+   the literals; standalone literal inserts exist only at the exact end of a
+   meta-block. Mid-meta-block flushes must end at the completion of a copy (any
+   unmatched trailing bytes wait in lookahead until the next flush). When the
+   byte-alignment lottery misses, the fallback splits the final copy so its tail
+   is a 2–4 byte copy (`insert = 0, copy = 2..4`), delaying at most 2–4 bytes.
+2. **Open-ended meta-block tables are unpruned and universal.** Because a
+   meta-block has no End-of-Block symbol and cannot exit before `MLEN`, tables
+   emitted at the start of a one-meta-block stream cannot be pruned to present
+   symbols (unlike buffered or per-flush meta-blocks). They must assign
+   non-zero code lengths (`1..=15`) to all 256 literal bytes (in the active or
+   a reachable fallback block type) and cover a universal basis of command and
+   distance symbols up to `lgwin`.
+3. **Shortfall padding emits a literal newline before a `distance = 1` copy, and
+   `text/event-stream` stays per-flush.** Because `distance = 1` repeats the
+   last response byte (`>` or `}`), a shortfall of $S = 1$ emits one literal
+   `\n` (`0x0A`) and $S \ge 2$ emits one literal `\n` plus a `distance = 1`
+   copy of length $S - 1$. Using `\n` instead of spaces avoids breaking
+   line-splitting `application/x-ndjson` parsers (`JSON.parse("   ")`).
+   `text/event-stream` uses per-flush meta-blocks so padding never triggers
+   SSE event dispatch.
+4. **Chunk-anchored references are strictly contained within their target
+   chunk (`offset + length <= len(target_chunk)`), and upgrade parses run over
+   composite admitted-chunk windows.** Cross-chunk matches during training are
+   split at chunk boundaries (and re-coalesced by the stitcher when those
+   chunks remain contiguous), preventing silent corruption when a dynamic slot
+   is inserted between two template chunks. Upgrade/training `q11` runs over a
+   sequence of admitted chunks on the route (never isolated 256 B chunks, which
+   miss cross-chunk refs, and never raw unredacted responses, which would
+   match into private data).
+5. **Distance short codes (`0..15`), literal contexts (`p1`, `p2`) and
+   static-dictionary wire offsets are resolved at stitch time.** Cache entries
+   and `.br`-recovered parses store logical references and explicit distances;
+   short-code substitution against the 4-entry distance ring buffer and
+   `max_distance` offsetting (`+ cdt_dict_size`) happen during stitching.
+
+**Context.** M0 technical review of [design.md](design.md) against RFC 7932.
+Each item above fixes a case where a literal reading of the initial design
+would produce an unencodable stream or silent decoder corruption.
+
+**Consequences.** Updated in [design.md](design.md), [architecture.md](architecture.md),
+[features.md](features.md) and [plan.md](plan.md). Round-trip and differential
+tests in M2–M5 should specifically exercise these edge cases.
+
+**Reopen if.** Never for RFC 7932 rules; padding or MLEN heuristics may be
+tuned once M5 flush-replay numbers are in hand.
+
 ## D-009: Admission gate is the single privacy boundary; secret slots are literal-only  (2026-10-21, status: accepted)
 
 **Decision.** Response-derived content (parse-cache entries, generated
@@ -100,14 +188,16 @@ crawled data proves unrepresentative of logged-in dynamic pages.
 ## D-006: AI-developed, human-gated, lean research workflow  (2026-10-21, status: accepted)
 
 **Decision.** AI agents write the code from the project documentation. The
-human directs, decides, and is the only committer. Process weight is lean:
+human directs, decides, and gates every commit (committing directly or
+explicitly asking the agent to commit). Process weight is lean:
 one agent, one pass, human scan, and reviews only when the human asks for one
 ([workflow.md](workflow.md)).
 
 **Context.** Stated by the project owner at kickoff. This is a research
 project with no production users or SLA.
 
-**Consequences.** Agents never commit. The docs are the project's memory and
+**Consequences.** Agents never commit unless explicitly asked by the operator.
+The docs are the project's memory and
 must be kept current as part of each change. Correctness of encoder output is
 protected by automated round-trip checks rather than by review ceremony.
 

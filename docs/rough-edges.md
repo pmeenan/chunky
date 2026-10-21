@@ -25,7 +25,12 @@ the owner's [dictionary-worker](https://github.com/pmeenan/dictionary-worker)
 read the client's encodings from `request.cf.clientAcceptEncoding` rather than
 only `Accept-Encoding`. It also served dictionaries as
 `application/octet-stream` because a compressible content type triggered
-"something weird".
+"something weird". Additionally, Cloudflare Workers' subrequest `fetch()`
+transparently decompresses `br`/`gzip` on `originResponse.body` while leaving
+the origin's `Content-Encoding` and compressed `Content-Length` headers on
+`originResponse.headers` (see D-011: never use `Content-Length` as uncompressed
+`MLEN` when `Content-Encoding` is present, strip `Content-Length` on re-encoded
+responses, and weaken strong `ETag`s).
 
 ---
 

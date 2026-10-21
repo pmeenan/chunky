@@ -31,7 +31,7 @@ per route for the design to pay off. See [docs/plan.md](docs/plan.md).
 ## How it's built
 
 Almost all code is written by AI agents working from the project
-documentation, directed and reviewed by a human who makes every commit. See
+documentation, directed and reviewed by a human who gates every commit. See
 [docs/workflow.md](docs/workflow.md).
 
 ## Start here

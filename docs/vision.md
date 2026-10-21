@@ -42,10 +42,12 @@ Each criterion is a measurement on a named corpus snapshot against the
 reference rust-brotli encoder (cross-checked once against C brotli), on the
 same machine, for the same inputs.
 
-- **Opportunity measured.** On the public-crawl corpus, the fraction of each
-  response's bytes that are byte-identical at ~256-byte chunk granularity to
-  an earlier response on the same route is reported per site and route. This
-  is the go/no-go number for the design.
+- **Opportunity measured.** On the public-crawl corpus, the repeatability
+  funnel per site and route is reported: ground-truth cross-response LZ77 +
+  static-dictionary repeatability, naive ~256-byte CDC whole-chunk overlap,
+  64/128/256-byte and delimiter-biased CDC overlap, and ~256-byte CDC with
+  prefix/suffix extension and simulated cut rules. This is the go/no-go gate
+  for the design.
 - **Gap recovered.** With a warm parse cache and a trained route model,
   output size on dynamic HTML closes most of the q1→q11 gap. The fraction
   recovered by each mechanism (parse cache alone, model alone, both) is
