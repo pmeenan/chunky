@@ -16,7 +16,7 @@ chunky is a research implementation of that idea, specified in
 - **A Rust encoder library** built on a fork of rust-brotli. It contains a
   content-defined parse cache, pre-trained per-route entropy models, and a
   streaming meta-block layout for flush-heavy documents.
-- **CLI tools** for building and measuring it. They crawl a corpus, run
+- **CLI tools** for building and measuring it. They capture a corpus, run
   baselines, measure chunk overlap, encode, and train models and warm caches.
 - **A Cloudflare Worker** that runs the encoder as wasm in a compressing proxy
   in front of an origin. This is the server deployment where the design's
@@ -38,27 +38,38 @@ generated site dictionary, builds on the same chunk index.
 
 ## Success criteria
 
-Each criterion is a measurement on a named corpus snapshot against the
-reference rust-brotli encoder (cross-checked once against C brotli), on the
-same machine, for the same inputs, window and explicit logical flush schedule.
-Use q1/q4/q11 baselines. Train only on approved public data, freeze the model,
+Each criterion is a measurement on a named corpus snapshot against pinned C
+`google/brotli`, the CPU gold standard, with rust-brotli reported alongside,
+on the same machine, for the same inputs and explicit logical flush schedule
+(D-016). The
+baseline is the reference quality curve (at least q1–q6, q9 and q11), with each
+quality's effective match reach reported: q0/q1 never match across input calls
+or flushes (RE-002), so a shared lgwin does not make them comparable (D-016).
+The initial corpus is manually captured logged-out Google Search netlogs,
+measured offline, with Google's served encoding and dictionary as an additional
+real-world baseline (D-018, proposed).
+Train only on approved public data, freeze the model,
 cache and cut rules, and evaluate later held-out captures (including a template
 change). Exact-response replay is labeled separately as a diagnostic.
 
-- **Opportunity measured.** On the public-crawl corpus, the repeatability
+- **Opportunity measured.** On the approved capture corpus, the repeatability
   funnel per site and route is reported: cross-response LZ77 +
   static-dictionary repeatability, naive ~256-byte CDC whole-chunk overlap,
   64/128/256-byte and delimiter-biased CDC overlap, and ~256-byte CDC with
   prefix/suffix extension and frozen cut rules. This measures reuse potential;
   legal current-response reference coverage is reported separately. Ordinary
   `br` cannot copy bytes from another response merely because the server has them.
-- **Gap recovered.** With a warm parse cache and a trained route model,
-  output size on dynamic HTML closes most of the q1→q11 gap. The fraction
-  recovered by each mechanism (parse cache alone, model alone, both) is
-  reported, as is CPU per byte as a multiple of reference q1, per-route size
-  regressions, and comparison with q4. Report gap recovery as
+- **Beats the reference curve.** With a warm parse cache and a trained route
+  model, chunky's (size, CPU) point on held-out dynamic HTML is a Pareto
+  improvement over the measured reference curve: smaller than every reference
+  quality at equal or lower CPU, or cheaper at equal size. Recovering most of
+  the q1→q11 gap does not count as success if q4–q6 already reach that size at
+  the same CPU. Report the contribution of each mechanism (parse cache alone,
+  model alone, both), per-route size regressions, and the M1 decomposition of
+  the gap. Report gap recovery as a diagnostic:
   `(q1_bytes - chunky_bytes) / (q1_bytes - q11_bytes)` when the denominator is
-  positive; otherwise report absolute sizes. Warm or stale models can regress.
+  positive, otherwise absolute sizes, aggregated byte-weighted per route with
+  per-response distributions. Warm or stale models can regress.
 - **Always valid.** 100% of outputs on the corpus and under fuzzing decode
   byte-identically with an unmodified reference decoder, including cold-cache
   and generic-model runs. Ordinary `br` uses an RFC 7932 decoder; CDT `dcb`
@@ -75,8 +86,8 @@ change). Exact-response replay is labeled separately as a diagnostic.
   isolate-wide allocation budget with runtime headroom. Capacity rejection
   happens before commitment; cancellation releases stream resources.
 
-M1 reports the baseline and the owner sets numerical size, CPU, latency and
-memory targets before M3/M4 results are evaluated (D-015). The research goal
+M1 reports the baseline and the owner sets numerical Pareto targets for size,
+CPU, latency and memory before M3/M4 results are evaluated (D-015, D-016). The research goal
 of q11-class size near q1 CPU is a hypothesis, not a per-response guarantee.
 
 ## Non-goals
@@ -93,7 +104,9 @@ of q11-class size near q1 CPU is a hypothesis, not a per-response guarantee.
   research project (D-006). Serving real users' sites would reopen the
   process decision.
 - **Logged-in or private-page corpora.** The corpus is logged-out public
-  crawls only (D-007).
+  captures only (D-007); per-source exceptions to header-based eligibility,
+  such as Google Search's `Cache-Control: private`, need an explicit decision
+  (D-018).
 - **Live private-traffic learning or content padding.** Approval of public
   training data is required; frequency and secret-token detection are heuristics,
   not privacy proofs (D-013). The encoder never appends decoded whitespace.

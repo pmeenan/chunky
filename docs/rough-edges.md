@@ -28,11 +28,41 @@ only `Accept-Encoding`. It also served dictionaries as
 "something weird". Additionally, Cloudflare Workers' subrequest `fetch()`
 transparently decompresses `br`/`gzip` on `originResponse.body` while leaving
 the origin's `Content-Encoding` and compressed `Content-Length` headers on
-`originResponse.headers` (see D-011: never use `Content-Length` as uncompressed
+`originResponse.headers` (see D-017: never use `Content-Length` as uncompressed
 `MLEN` when `Content-Encoding` is present, strip `Content-Length` on re-encoded
 responses, and weaken strong `ETag`s).
 
 ---
+
+## RE-002: Reference q0/q1 never match across input calls or flushes  (2026-10-21, status: open)
+
+**Environment.** Local `libbrotlienc.so.1` (C brotli 1.1.0) via Python ctypes,
+`lgwin = 22`. rust-brotli is a port and probably behaves the same; check in M1.
+
+**Repro.** Generate 8000 random bytes `B`. Feed `B`, `B`, `B` as three separate
+`BrotliEncoderCompressStream` calls: first with `FLUSH` after each piece, then
+with plain `PROCESS` calls, then once as a single 24000-byte feed. Also compress
+a 300 KB random blob repeated twice in a single feed.
+
+**Observed.**
+
+| Quality | Three calls, with or without FLUSH | Single 24 KB feed | 300 KB blob ×2, one feed |
+| --- | --- | --- | --- |
+| q0, q1 | 8003 / 8003 / 8004 bytes, no matches | 8071 bytes (matches found) | 600005 bytes (no match) |
+| q2 | 8003 / 24 / 22 bytes with FLUSH | 8070 bytes | 300071 bytes |
+| q4, q5, q11 | about 8003 / 13 / 12 bytes with FLUSH | — | 300027 bytes (q5) |
+
+q0/q1 compress each input fragment independently with a freshly cleared hash
+table and a bounded fragment size. q2 and above keep a persistent hasher over
+the ring buffer.
+
+**Expected.** That `lgwin` and "matched windows" bound match reach for every
+quality.
+
+**Impact.** Under per-read streaming, q1 cannot reference earlier reads at all,
+which inflates the q1→q11 gap and makes q1 a poor cold path. D-016 makes the
+fallback q2-class and requires reporting each quality's effective reach.
+Baseline tools must feed inputs with the same call and flush pattern they claim.
 
 ## RE-001: Partial literal output does not require a completed copy  (2026-10-21, status: worked-around)
 
@@ -48,7 +78,7 @@ status is `SUCCESS` and output is `babab`, giving exactly `abababab` in total.
 The distance begins at bit 91, after the first 88 supplied bits, so the initial
 output precedes completion of both the literal run and the copy distance.
 
-**Observed vs expected.** D-010 incorrectly inferred that every mid-meta-block
+**Observed vs expected.** D-010 (since culled) incorrectly inferred that every mid-meta-block
 input pause must complete a copy. The decoder can expose literals mid-command;
 the command's copy-length field appearing first does not prevent that output.
 The [reference decoder](https://github.com/google/brotli/blob/master/c/dec/decode.c)

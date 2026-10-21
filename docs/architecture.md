@@ -14,12 +14,17 @@
 - Streaming initially completes actual-length meta-blocks at logical flushes.
   Exact-length single-block work is parked after M5; no decoded padding (D-012).
 - Runtime models/caches are immutable and pinned per stream. All training is
-  offline from approved public sources and eligible spans (D-011/D-013).
+  offline from approved public sources and eligible spans (D-013/D-017).
 - Determinism includes logical flush positions and encoder options, and uses
   deterministic work limits. Network scheduling is not a deterministic input
   boundary (D-014).
 - Memory admission and fallback are isolate/stream-state contracts, not
-  consequences of demand-grown buffers (D-014).
+  consequences of demand-grown buffers (D-014). Reservations use the
+  retained-history cap, not `1 << lgwin` (D-017).
+- Every emitted copy and dictionary reference is byte-verified at emit time.
+  Artifacts are hints and cannot cause wrong output bytes (D-017).
+- The cold, rejected-model and fallback encoder is reference q2-class, because
+  q0/q1 never match across input calls (D-016, RE-002).
 
 ## Workspace
 
@@ -27,10 +32,11 @@ Names and fork packaging remain M0 choices.
 
 | Crate / dir | Role | Targets |
 | --- | --- | --- |
-| `brotli` fork | External commands, fast/q11 oracle tables, per-flush writer and reference q1/q4/q11 | native, wasm32 |
+| `brotli` fork | External commands, fast/q11 oracle tables, per-flush writer, emit-time verification and the reference quality curve | native, wasm32 |
 | `chunky-core` | Chunking, immutable cache lookup, reference resolution, bounded miss search, tables and streaming encoder | native, wasm32 |
 | `chunky-formats` | Validated versioned model/warm-cache blobs in M4; sidecars in M8 | native, wasm32 |
-| `chunky-cli` | crawl, label, baseline, overlap, encode, train, verify, inspect, replay, bench, sidecar | native |
+| `chunky-cli` | netlog extraction (or an M0 script first), served-stream flush recovery, label, baseline, overlap, encode, train, verify, inspect, replay, bench, sidecar | native |
+| C baseline harness | Pinned C `google/brotli` built with documented clang flags, natively and to wasm32, driven with the same call/flush sequence as the other encoders; benchmark-only (D-016) | native, wasm32 |
 | `worker/` | Negotiation, origin fetch, artifact loading, memory admission, stream pump and cancellation | wasm32 plus JS if selected |
 
 The core has no filesystem, threads or clocks. Wrappers supply buffers, explicit
@@ -54,11 +60,14 @@ EOF closes the same brotli stream. No API discards an open block and silently
 starts a new independent stream. The parked exact-length path must distinguish
 EOF success from length mismatch and handle pending command fields explicitly.
 
-The initial Worker calls a logical flush after each nonempty origin read;
-replaying the same body with a different read schedule can change compression.
-Core fragmentation tests hold logical flush positions fixed. End-to-end delivery
-tests measure paced markers, not preservation of origin writes as read chunks.
-Same-tick coalescing is parked pending evidence about its latency and scheduling.
+The Worker derives logical flushes from origin reads through a flush policy:
+flush every nonempty read, coalesce reads that are already available, or wait
+for a minimum byte count unless the source is idle. M5 measures each policy's
+header overhead against delivery latency; the initial policy flushes every read.
+Replaying the same body with a different read schedule or policy can change
+compression. Core fragmentation tests hold logical flush positions fixed.
+End-to-end delivery tests measure paced markers, not preservation of origin
+writes as read chunks.
 
 ## Isolate-wide memory budget
 
@@ -70,9 +79,10 @@ headroom. Account for:
 
 - Shared immutable wasm/model/cache/dictionary/sidecar storage, including any
   backing JS copies and old/new versions during refresh.
-- Reserved per-stream maxima: allowed rolling window, hasher/index, chunk and
-  command storage, table scratch, input/lookahead, completion buffer, queued
-  output and JS/wasm transfer copies. Include reference-q1 fallback allocations.
+- Reserved per-stream maxima: retained-history cap (not the declared
+  `1 << lgwin`), hasher/index, chunk and command storage, table scratch,
+  input/lookahead, completion buffer, queued output and JS/wasm transfer
+  copies. Include q2-class fallback allocations.
 - Allocator fragmentation and transient growth peaks; reusing a bounded pool
   must not cause unaccounted new wasm memory growth.
 
@@ -84,7 +94,7 @@ Dictionary references read the shared slice directly, using Shared Brotli's
 separate address region; dictionary bytes are not copied into each stream window.
 
 If a reservation fails, select an acceptable pass-through/identity representation
-or a separately budgeted q1 path before commitment; otherwise return an error.
+or a separately budgeted q2-class path before commitment; otherwise return an error.
 Do not reduce a committed lgwin or wait indefinitely for compression capacity.
 Bound the pump's input/output queues, await downstream capacity before reading
 more origin input, and release streams/reservations on completion, failure or
@@ -95,7 +105,8 @@ accounting, not just initial buffer sizes.
 ## Offline data and artifact flow
 
 ```
-approved public crawl (local raw captures)
+approved capture corpus (manually captured netlogs, local, D-018)
+    -> netlog extractor: cookies stripped, encoded/decoded bytes, dictionaries, flush offsets
     -> source/span eligibility filter
     -> chronological training / tuning / held-out evaluation manifests
     -> train and freeze model + warm cache + cut rules
@@ -114,7 +125,7 @@ new-response generalization; include stale/template-change tests (D-015).
 
 Blob compatibility covers site/route, chunker and encoder/format versions.
 Validate lengths, offsets and allocation bounds before exposure to the core.
-A mismatch selects reference q1 before commitment. Serialization/loading lands
+A mismatch selects the q2-class reference path before commitment. Serialization/loading lands
 in M4; M7 validates rollout and freshness, not the initial loader.
 
 ## Worker request path
@@ -132,11 +143,14 @@ with explicit admission, commitment and cancellation behavior:
    unencoded representation. An encoded length is never MLEN and does not prove
    that the origin buffered the body. Verify transparent decompression and header
    behavior with the selected runtime; maintain an explicit representation state.
+   The Q3 spike tests requesting `Accept-Encoding: identity` from the origin.
+   That avoids origin compression and edge decompression, and yields a trusted
+   length when the origin honors it.
 4. Once admitted, set Content-Encoding, merge Vary, remove encoded-length and
    other invalidated representation metadata, and weaken strong ETags as needed.
    For `br`, return a streaming Response with `encodeBody: "manual"`. M8 adds
    dcb framing/identity and its Vary/negotiation rules separately.
-5. Pump bounded blocks with per-read flushes for streaming responses and a
+5. Pump bounded blocks with policy-driven flushes for streaming responses and a
    deterministic byte cap for completion buffering. Await output capacity;
    cancel origin reads and dispose the encoder if the client cancels.
 6. Finish and release resources. Shed optional aggregate performance recording
@@ -147,7 +161,7 @@ with explicit admission, commitment and cancellation behavior:
 
 | State | Allowed behavior on failure |
 | --- | --- |
-| **Preparing**: neither outgoing headers nor encoded bytes committed | Select compatible q1 or acceptable origin/identity representation, with matching headers and reservation; otherwise return an error |
+| **Preparing**: neither outgoing headers nor encoded bytes committed | Select the compatible q2-class reference path or an acceptable origin/identity representation, with matching headers and reservation; otherwise return an error |
 | **Streaming**: Response handed to runtime or encoded output written | Keep encoding and stream state. At a healthy completed block boundary, optionally continue with bounded uncompressed meta-blocks inside the same br stream. Pending commands/blocks must finish validly before that transition |
 | **Completed**: valid encoder EOF written | Release state; optional recording may be shed |
 | **Aborted**: state/input unrecoverable or request terminated | Error/cancel the body, cancel upstream, release state. Do not synthesize valid EOF, identity suffixes or a fresh compressed stream |

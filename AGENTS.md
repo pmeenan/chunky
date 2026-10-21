@@ -36,8 +36,9 @@ affected docs. Until then, these govern.
   per-request CPU caps. (D-004)
 - **Hot path reads, learning writes off-request.** The compression path only
   reads shared state. Learning can be shed without affecting validity, and a
-  cold cache uses reference q1 with the same window and flush policy. (D-008,
-  D-014)
+  cold cache uses a q2-class reference encoder with the same window and flush
+  policy. Every emitted reference is byte-verified, so artifacts cannot cause
+  wrong output. (D-008, D-014, D-016, D-017)
 - **Learning uses approved public data only.** Shared caches, models,
   dictionaries and samples all pass the same source and span eligibility gate.
   Private traffic never trains them; repetition is not proof of publicity.
@@ -54,7 +55,7 @@ affected docs. Until then, these govern.
 | Path    | What lives there |
 | ------- | ---------------- |
 | `docs/` | Design, vision, plan, architecture, decisions, features, rough edges, workflow |
-| `data/` | Local crawl corpus and derived data. Git-ignored, never committed (D-007) |
+| `data/` | Local corpus (captured netlogs, crawls) and derived data. Git-ignored, never committed (D-007) |
 
 The Cargo workspace (core, CLIs, Worker) lands in M1. Update this table when it
 does.
@@ -87,7 +88,8 @@ build → commit loop, on-demand reviews, and the human commit gate.
    rust-brotli, wasm or Workers-runtime quirk burned real debugging time and
    will bite again. Skip the formal reproduction unless it's cheap to capture.
 3. **Measure what a decision hangs on.** Compression claims are numbers: size
-   and CPU against reference q1/q11 on the corpus, with the command and corpus
+   and CPU against the reference quality curve (pinned C brotli for CPU) on the
+   corpus, with the command and corpus
    named. When a choice depends on current platform behavior (Workers limits,
    browser decoders), check a current source or run it. Training knowledge is
    stale. Everything else: ship it and see.
@@ -111,7 +113,8 @@ build → commit loop, on-demand reviews, and the human commit gate.
 ## Current status
 
 Milestone **M0 (plan the plan)**: the feature set, architecture, and milestone
-ladder include the design-review corrections; corpus/toolchain choices and
-Worker/fork spikes remain open. See [docs/plan.md](docs/plan.md). No code
+ladder include the design-review corrections. The initial corpus is proposed
+(manual Google Search netlogs, D-018); toolchain choices and the
+extraction/Worker/fork spikes remain open. See [docs/plan.md](docs/plan.md). No code
 exists yet; workspace scaffolding is M1. Keep this paragraph short and current
 when plan.md milestone status changes (rule 4).

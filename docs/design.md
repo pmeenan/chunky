@@ -1,8 +1,8 @@
 # Learned Brotli Encoder for Dynamic HTTP Response Compression
 
-Oct 21, 2026 · Patrick Meenan · Source: [design doc](https://claude.ai/artifact/7MMJZCAHFqqYr2upeYTwAX)
+Oct 21, 2026 · Patrick Meenan · Originally drafted as a [design doc](https://claude.ai/artifact/7MMJZCAHFqqYr2upeYTwAX); this repository copy is authoritative (D-001).
 
-Revised through D-012–D-015. Per-flush encoding is the initial streaming design; exact-length single-meta-block encoding is a parked experiment. The project remains pre-code.
+Revised through D-012–D-018. Per-flush encoding is the initial streaming design; exact-length single-meta-block encoding is a parked experiment. The project remains pre-code.
 
 ## Summary
 
@@ -16,7 +16,7 @@ Content-encoding on the web is limited to gzip, brotli and zstd, and in practice
 
 For a server dynamically compressing HTML for one site, this wastes work. Responses from the same route share most of their bytes with every previous response from that route. The encoder re-finds the same matches, re-chooses the same parse, and re-clusters the same literal distributions on every request.
 
-**Where the CPU goes.** At q1 the encoder hashes every position with one candidate and no lazy evaluation, makes no parse decisions, and still histograms and builds Huffman tables per meta-block. The entropy stage is a larger share than people expect because the match finder is so cheap. The q1-to-q11 size gap on HTML comes from four sources, all of which are deterministic functions of the input and so all memoizable:
+**Where the CPU goes.** At q1 the encoder hashes every position with one candidate and no lazy evaluation, makes no parse decisions, and still histograms and builds Huffman tables per meta-block. It also compresses each input fragment with a freshly cleared hash table, so it never matches across input calls or flushes, whatever the window (RE-002). The cheap streaming baseline is therefore q2-class, and the honest comparison is the whole reference quality curve, not q1 alone (D-016). The entropy stage is a larger share than people expect because the match finder is so cheap. The q1-to-q11 size gap on HTML comes from four sources, all of which are deterministic functions of the input and so all memoizable:
 
 1. Parse quality: lazy and optimal parsing versus greedy.
 2. Context modeling and block splitting: several literal tables selected by the previous two bytes, chosen at q11 by expensive histogram clustering.
@@ -36,7 +36,7 @@ For a server dynamically compressing HTML for one site, this wastes work. Respon
 - Work at the HTTP server or CDN layer with no application changes, and get better when the application supplies template hints.
 - Handle both size-known and size-unknown responses, and both streaming-critical and completion-bound responses, with one encoder.
 - Produce CDT dictionary variants of static assets cheaply enough to generate on the first request at full quality.
-- Keep serving independent of learning: a cold or rejected model selects reference q1 before encoding, under the same window and flush policy. Learning is sheddable without affecting validity; warm-model gains are measured.
+- Keep serving independent of learning: a cold or rejected model selects the q2-class reference encoder before encoding, under the same window and flush policy (D-016). Learning is sheddable without affecting validity; warm-model gains are measured.
 - Train shared artifacts only from approved public sources and eligible spans; exclude private traffic from all learning paths. Literal-only secret slots are a mitigation, not a proof of compression-side-channel resistance.
 
 **Non-goals**
@@ -124,11 +124,13 @@ The parse cache maps a content-addressed chunk of input to the command sequence 
 
 **Cache entry.** Chunk fingerprint plus a command list: literal runs with block-type tags, and copies stored as logical references, not absolute distances or distance short codes:
 
-- Chunk-anchored: (target chunk id, offset, length), strictly contained within `target_chunk` (`offset + length <= len(target_chunk)`). Cross-chunk matches found during training are split at target-chunk boundaries so a dynamic slot inserted between two template chunks never causes a copy to overrun into the wrong bytes; when the target chunks remain contiguous in the current response, the stitcher can coalesce the split copies back into one command. Because the stitcher knows every emitted chunk's output position, if the verified target chunk is present earlier and still in the allowed response window, its distance resolves with no search.
+- Chunk-anchored: (target chunk id, offset, length), strictly contained within `target_chunk` (`offset + length <= len(target_chunk)`). Cross-chunk matches found during training are split at target-chunk boundaries so a dynamic slot inserted between two template chunks never causes a copy to overrun into the wrong bytes; when the target chunks remain contiguous in the current response, the stitcher can coalesce the split copies back into one command. Because the stitcher knows every emitted chunk's output position, if the target chunk is present earlier and still within retained history, its distance resolves with no search.
 - Dictionary-anchored: (dictionary id, offset, length) for static-dictionary words (with transform) and CDT dictionary bytes. The logical reference is independent of response position when its dictionary identity and slice/transform are valid; the stitcher converts it to a concrete wire distance (`max_distance + cdt_dict_size + 1 + word_id` for static dictionary, `max_distance + cdt_dict_size - offset` for CDT; dictionary size is zero for ordinary `br`) at the current output position.
 - Predicted-distance: the distance observed last time, verified at emit by `memcmp` at that distance and a small neighborhood (about plus or minus 64 bytes). Covers repeated structures whose stride shifts by a few bytes of dynamic data.
 
-Distance short codes (`0..15` against brotli's 4-entry last-distance ring buffer) and 2-byte literal context IDs (`p1`, `p2` from the output window) are resolved during the stitch/flush pass rather than stored in cache entries, since preceding chunks and distances vary across responses (D-010). Unresolvable references degrade to a local search over the gap or to literals. Entries are roughly 20 to 40% of the chunk's size; a site with tens of MB of distinct template bytes is a cache of a few MB.
+Distance short codes (`0..15` against brotli's 4-entry last-distance ring buffer) and 2-byte literal context IDs (`p1`, `p2` from the output window) are resolved during the stitch/flush pass rather than stored in cache entries, since preceding chunks and distances vary across responses (D-017). Unresolvable references degrade to a local search over the gap or to literals.
+
+**Emit-time verification.** Before writing any copy, the encoder compares the source bytes in retained history (or the negotiated dictionary slice) with the input bytes the copy covers; static-dictionary references are expanded with their transform and compared. A mismatch falls back to local search or literals. Cache entries, fingerprints and predictions are hints only, so a hash collision, stale entry or corrupt artifact can cost size but never output correctness. The cost is linear in referenced bytes, roughly a `memcmp` per copy (D-017). Entries are roughly 20 to 40% of the chunk's size; a site with tens of MB of distinct template bytes is a cache of a few MB.
 
 **Lookup.** A prefix index keyed on the first ~32 bytes after a boundary, verified incrementally as bytes arrive, so a flush that lands mid-chunk still matches its verified prefix and continues into the next flush. A full-chunk fingerprint confirms whole-chunk hits.
 
@@ -218,11 +220,15 @@ Splitting a feed into smaller buffers without changing those positions must
 produce identical output. Search limits count candidates/bytes compared rather
 than wall-clock time (D-014).
 
-The initial Worker flushes each nonempty origin read after processing bounded
-blocks. Those reads reflect transport fragmentation; they do not preserve
-application writes. Same-tick coalescing is parked until its scheduling and
-latency effects are measured. Never wait for idle to collect more document
-bytes. Replay records logical positions separately from transport fragments;
+The Worker maps origin reads to logical flushes through a flush policy. The
+initial policy flushes each nonempty read after processing bounded blocks;
+M5 also measures coalescing reads that are already available and a minimum
+byte count unless the source is idle. Every flush pays a full table
+declaration, so with many small reads the policy can cost as much as the
+q1→q11 gap. Those reads reflect transport fragmentation; they do not preserve
+application writes. Never wait on a timer for more document bytes. For offline
+measurement, flush schedules come from served streams: the decoded offsets of
+encoder flush boundaries in captured responses (D-018). Replay records logical positions separately from transport fragments;
 end-to-end tests use paced origin markers and client arrival times over HTTP/2
 and HTTP/3, without requiring packet or read boundaries to survive.
 
@@ -245,7 +251,7 @@ body length or application flush positions.
 
 Only a trusted Content-Length on an unencoded upstream representation, or a body
 already held in full, supplies an exact uncompressed length. A compressed origin
-Content-Length must never become MLEN (D-011); it also does not prove the origin
+Content-Length must never become MLEN (D-017); it also does not prove the origin
 buffered its entire response. Knowing length does not reveal histogram counts.
 Cacheability controls output reuse separately and does not convert a live body
 into an available buffer. Private responses never become training inputs.
@@ -295,7 +301,7 @@ All training inputs first pass the approved-source/span gate (D-013).
 | --- | --- | --- | --- |
 | Inline | During compression | Read-only cache/model lookup and per-request operational counts; deterministic search limits | Measured bounded work per input byte/block |
 | Post-stream finalization | After EOF or cancellation | Merge bounded aggregate performance counters; release encoder and reservations; no body samples, fingerprints or content histograms from live requests | Shed recording first; cleanup is mandatory |
-| Offline upgrade/trainer | CLI over eligible public captures | Build route histograms and frozen cut rules; parse composite eligible-chunk sequences with q11; split chunk-anchored targets at chunk boundaries; select a bounded warm cache | Off-request |
+| Offline upgrade/trainer | CLI over eligible public captures | Build route histograms and frozen cut rules; parse real eligible responses with q11, dropping references into excluded spans and never admitting chunks that overlap them; split chunk-anchored targets at chunk boundaries; select a bounded warm cache | Off-request |
 | Artifact publication | Offline, fleet-wide | Package model + warm cache + provenance and compatibility metadata; validate before publication | Off-request; versioned immutable blobs |
 
 A fixed artifact removes live cache learning as a source of output variation.
@@ -317,7 +323,7 @@ just to sample traffic. Offline corpus derivation creates eligible trainer
 samples under the same gate as histograms, cut rules and cache entries. Live
 Worker finalization records only aggregate operational performance counters.
 
-**Graceful degradation.** A cold/rejected model selects reference q1 before
+**Graceful degradation.** A cold/rejected model selects the q2-class reference encoder before
 commitment under the configured window and flush policy. With a warm model,
 size and CPU can improve or regress as content changes; report both. Never
 promise monotonic improvement from warming. Once bytes are committed, only a
@@ -352,7 +358,7 @@ The plain q11 variant is produced at build time (out of scope). Dictionary varia
 
 1. **Chunk dedup against the dictionary.** Chunk both once (the sidecar holds the dictionary's index). Runs of identical chunks become single long copies into the dictionary region; for v123 against v120 that resolves 90%+ of bytes with a handful of commands and no search.
 2. **Localized search for changed chunks.** A changed chunk is usually its old self with a few bytes different. Its neighbors say where the old chunk sits in the dictionary, so the search is "look around here," a few comparisons at predicted offsets.
-3. **Parse recovery from the build's `.br` file.** The CLI recovers and stores logical parses before serving variants; the serving path reuses this metadata. A modified decoder that emits commands instead of bytes recovers q11's intra-file parse, block splits and context maps at decode speed. Because replacing spans with CDT dictionary copies changes the 4-entry last-distance ring buffer and shifts the static-dictionary distance range by `+ cdt_dict_size` (the ordinary-history `max_distance` itself stays capped), the command-emitting decoder resolves all distance short codes (`0..15`) into explicit backward distances and decodes static-dictionary distances (`> max_distance`) into logical `(word_len, word_idx, transform)` references (D-010). Producing the variant is then: replace command spans covering dictionary-matched runs with dictionary copies (a straddling copy is split at the run edge; both halves stay valid if $\ge 2$ bytes, or a 1-byte remainder becomes a literal), optionally try localized dictionary matches inside changed regions, keep everything else, re-resolve static-dictionary offsets and distance short codes, and re-entropy-code. Intra-file copies remain valid because the output bytes are the same regardless of source. Cost is roughly decode plus chunk-hash plus entropy-code, hundreds of MB/s.
+3. **Parse recovery from the build's `.br` file.** The CLI recovers and stores logical parses before serving variants; the serving path reuses this metadata. A modified decoder that emits commands instead of bytes recovers q11's intra-file parse, block splits and context maps at decode speed. Because replacing spans with CDT dictionary copies changes the 4-entry last-distance ring buffer and shifts the static-dictionary distance range by `+ cdt_dict_size` (the ordinary-history `max_distance` itself stays capped), the command-emitting decoder resolves all distance short codes (`0..15`) into explicit backward distances and decodes static-dictionary distances (`> max_distance`) into logical `(word_len, word_idx, transform)` references (D-017). Producing the variant is then: replace command spans covering dictionary-matched runs with dictionary copies (a straddling copy is split at the run edge; both halves stay valid if $\ge 2$ bytes, or a 1-byte remainder becomes a literal), optionally try localized dictionary matches inside changed regions, keep everything else, re-resolve static-dictionary offsets and distance short codes, and re-entropy-code. Intra-file copies remain valid because the output bytes are the same regardless of source. Cost is roughly decode plus chunk-hash plus entropy-code, hundreds of MB/s.
 
 Variants are cached per (asset hash, dictionary hash). The chunk index doubles as a compressibility estimator: the fraction of an asset's chunks present in a candidate dictionary predicts the savings without compressing, which guides which prior versions to retain and which resources a `Use-As-Dictionary` match pattern should cover.
 
@@ -424,6 +430,9 @@ D-007; trainer derivation and exported artifacts require eligibility filtering.
 | Dynamic responses first; CDT static variants second; build-time static compression out of scope | A site with a build should already produce q11 there; one without a build will not run training either. Dictionary variants cannot be built ahead because the pairs come from traffic. |
 | Reject precompressed fragment concatenation | Reusable fragments are a few hundred bytes (CDT experience); per-fragment headers cost the same. Cache command sequences stitched into one meta-block instead. |
 | Parse cache references are chunk-anchored, dictionary-anchored or predicted-distance, never absolute | Absolute distances break whenever preceding content changes; anchored references resolve exactly, predictions verify cheaply. |
+| Every emitted reference is byte-verified at emit time | Output correctness must not depend on fingerprints, cache contents or artifact integrity (D-017) |
+| Retained history is a cap separate from the declared window | Document matches rarely need megabyte distances; reserving `1 << lgwin` per stream caps concurrency (D-017) |
+| Success is a Pareto improvement over the reference quality curve; cold path is q2-class | q4–q6 already sit between q1 and q11, and q0/q1 cannot match across flushes (D-016, RE-002) |
 | Pre-train modeling decisions; build tables per meta-block from real counts smoothed with a prior | Clustering is the expensive part; Huffman construction is microseconds. Size-unknown responses are handled because tables are chosen at flush. |
 | Per-flush meta-blocks with actual MLEN; exact-length single-block experiment parked | Preserve exact bytes and prompt delivery first; no decoded padding or assumed 2–4-byte delay bound (D-012) |
 | Tiny first flush uses a small meta-block | Preload hints must not wait for later origin bytes or a large table header |
@@ -451,13 +460,13 @@ D-007; trainer derivation and exported artifacts require eligibility filtering.
 
 **To settle by measurement:**
 
-- [ ] Held-out q1/q4/q11 size and CPU with matched windows and logical flushes;
+- [ ] Held-out reference-curve size and CPU on identical logical flushes, with effective match reach, served-encoding and with-dictionary baselines and the q1→q11 gap decomposition;
   cache-only, model-only and combined ablations; cold and stale artifacts.
 - [ ] Reusable parse coverage and resolved legal-reference coverage separately,
   with/without frozen cut rules and with synthetic template hints.
 - [ ] Actual table/header/alignment cost and thresholds for small blocks.
 - [ ] Per-flush CPU, total withheld bytes, added delivery latency and unmatched
-  tails; no unmeasured delay bounds or same-tick coalescing claims.
+  tails; no unmeasured delay bounds; compare flush policies (every read, coalesce available reads, minimum bytes unless idle).
 - [ ] Failure injection before headers, within a command/block, at boundaries
   and at EOF, including origin truncation and downstream cancellation.
 - [ ] Concurrent slow-consumer memory peaks including model refresh, JS/wasm
@@ -480,7 +489,7 @@ D-007; trainer derivation and exported artifacts require eligibility filtering.
 
 [plan.md](plan.md) is the authoritative milestone ladder; D-015 revises the
 original ordering. M0 still settles the toolchain, public corpus policy and
-Worker/fork spikes. M1 measures reuse potential and matched q1/q4/q11 baselines;
+Worker/fork spikes. M1 measures reuse potential, the reference quality curve and a gap decomposition;
 M2 establishes command injection and byte-preserving per-flush emission; M3
 measures cached parses; M4 adds route training plus versioned artifact loading;
 M5 validates streaming; M6 integrates the proxy; M7 validates fleet freshness
@@ -499,5 +508,5 @@ same-corpus warm replay separately from held-out generalization.
 Freeze artifacts before evaluation, retain a template-change slice, and compare
 size/CPU on identical bytes, windows and logical flushes. Report native and wasm
 separately. The owner sets numerical acceptance targets after M1's baseline and
-before inspecting M3/M4 results; favorable overlap alone is insufficient to
+before inspecting M3/M4 results, and uses the decomposition to order M3 and M4; favorable overlap alone is insufficient to
 claim q11-class output near q1 CPU.

@@ -30,7 +30,190 @@ Decision / Context / Consequences / Reopen if
 
 ---
 
-## D-015: Evaluate frozen artifacts on later captures; establish per-flush encoding before single-block experiments  (2026-10-21, status: accepted)
+## D-018: Initial corpus: manually captured logged-out Google Search netlogs, extracted offline  (2026-10-21, status: proposed)
+
+**Decision (proposed by the owner; accepting it amends D-007 and D-013 for this
+one source).**
+
+- The first corpus is logged-out Google Search result pages plus Google's
+  published compression dictionary. The owner captures them by hand: run a
+  normal logged-out browser session with netlog raw-byte capture
+  (`--net-log-capture-mode=Everything`, or chrome://net-export with raw bytes)
+  and perform searches. There is no crawler, automation or proxy. The corpus
+  is a set of offline files, measured offline, separate from the Worker path.
+- An extraction script turns each netlog into per-response manifests:
+  request/response headers with cookie values stripped, encoded and decoded
+  bodies, per-read arrival timestamps, served encoding, and the dictionary
+  hash. Dictionary responses are extracted and stored by hash with their
+  `Use-As-Dictionary` metadata, so dcb/dcz bodies can be decoded and
+  re-encoded offline. Script work verifies which netlog events carry which
+  bytes.
+- Logical flush positions come from the served encoded stream. They are the
+  decoded offsets where Google's stream reaches an encoder flush boundary (a
+  byte-aligned meta-block end for `br`, a block end for zstd-based encodings),
+  paired with arrival timestamps. Read sizes are recorded separately as
+  transport fragments.
+- The owner chooses query terms; no other person's queries enter the corpus.
+  Record locale, region and device class with each session. Route =
+  `/search` plus vertical and device class. Repeat sessions on different days
+  to build the chronological training/tuning/evaluation and template-change
+  slices (D-015).
+- These responses carry `Cache-Control: private`, `Set-Cookie`, and requests
+  carry the logged-out session's site-set cookies (checked 2026-10-21). For
+  this approved source, those signals do not make a response ineligible. The
+  basis is an owner-controlled logged-out session with owner-chosen public
+  queries. Cookie values, CSP nonces, per-response ids and tokens, XSRF values,
+  and any other value that varies per response without being page content are
+  excluded spans and literal-only. Identify them by diffing across responses
+  plus token heuristics before deriving anything. Consent and CAPTCHA pages
+  are excluded.
+- Raw netlogs contain cookies and other credential-equivalent data. They stay
+  under `data/` and are never committed or shared; only the extracted,
+  cookie-stripped manifests feed the tools.
+- Generalization claims beyond Google need at least one more site. Common
+  Crawl monthly snapshots are a fallback source with built-in chronological
+  slices.
+
+**Context.** Google Search serves a document dictionary and streams its
+responses, so browser netlogs give real flush schedules and a real
+dictionary baseline. Manual browsing is not automated crawling, so D-007's
+crawler politeness rules (robots.txt `Disallow: /search`) do not govern it.
+D-013, however, treats private, Set-Cookie and credentialed responses as
+ineligible, which is why this source needs an explicit exception.
+
+**Consequences.** M0 adds an extraction-script spike. M1 needs the netlog
+extractor and served-stream flush recovery rather than a crawler for this
+source. A manual corpus is small. Size the held-out slices to what can be
+captured, and treat per-route results from a few hundred responses as
+indicative.
+
+**Reopen if.** The manual corpus is too small to separate training and
+evaluation meaningfully, or results fail to generalize to other sites.
+
+## D-017: Encoder and Worker invariants: verified emission, chunk-contained references, retained history, immutable artifacts  (2026-10-21, status: accepted)
+
+**Decision.** This entry consolidates the parts of D-010 and D-011 that
+still hold (both are culled; git history keeps the originals) and adds three
+rules (items 1, 3 and 5). D-012 still governs the format contract and D-014
+the commitment and memory states.
+
+1. **Every emitted reference is byte-verified at emit time.** Before writing
+   a copy, the encoder compares its source bytes in retained history (or in
+   the negotiated dictionary slice) with the input bytes the copy covers. A
+   static-dictionary reference is expanded with its transform and compared.
+   On a mismatch, the encoder falls back to local search or literals. Cache
+   entries, fingerprints, predicted distances and artifacts are hints only;
+   none of them can make the encoder emit wrong bytes. The cost is linear in
+   the referenced bytes.
+2. **Chunk-anchored references stay inside their target chunk**
+   (`offset + length <= len(target_chunk)`). Training splits cross-chunk
+   matches at target boundaries. The stitcher may coalesce them again when
+   the chunks are contiguous in the current response.
+3. **Training parses run over real eligible responses, not synthetic
+   composite windows.** Chunks that overlap excluded spans are never
+   admitted, and references into excluded spans are dropped from admitted
+   entries. Real responses keep the reference structure that actually
+   co-occurs. D-010 used composite windows to avoid matching into private
+   data; D-013's source/span gate now covers that.
+4. **Distance short codes, literal contexts and dictionary wire distances
+   resolve at emit time.** Cache entries and recovered `.br` parses store
+   logical references and explicit distances. The D-012 geometry converts
+   them at each output position.
+5. **Retained history is an encoder option separate from the declared
+   window.** The stream header's WBITS bounds only the decoder. The encoder
+   keeps at most a configured retained-history cap (for example 256 KB for
+   documents) and never emits ordinary distances beyond it. D-014
+   reservations use the cap, not `1 << lgwin`, and the cap is part of the
+   determinism options. Static-dictionary and CDT distances still use
+   `max_distance` from the declared window. CDT dictionaries are read from
+   the shared immutable slice, never copied into stream buffers.
+6. **Runtime artifacts are immutable per version** (model, warm cache,
+   dictionary sidecar) and pinned per stream. Upgrade parses and retraining
+   happen offline and ship as a new version. `waitUntil` handles lifecycle
+   and aggregate counters only (D-013).
+7. **An upstream Content-Length is an exact uncompressed length only for an
+   unencoded representation.** Workers `fetch()` may transparently
+   decompress while leaving the origin's `Content-Encoding` and compressed
+   `Content-Length` in place. Re-encoded responses drop `Content-Length` and
+   weaken strong ETags (RFC 9110 §8.8.3).
+
+**Context.** Before this entry, D-010 and D-011 contained rules that later
+entries had rejected (padding, the 2–4-byte bound, trainer samples) in full
+text. Verification was defined only for predicted distances, so a
+fingerprint collision or a corrupt artifact could produce a valid stream that
+decodes to the wrong bytes. Tying memory reservations to `1 << lgwin` caps an
+isolate at a few dozen streams even though document matches rarely need
+megabyte distances.
+
+**Consequences.** M2 lands emit-time verification and the retained-history
+cap. Fuzzing becomes defense in depth rather than the only correctness
+argument, and the artifact loader needs to guarantee memory safety, not
+content correctness.
+
+**Reopen if.** Measured verification cost dominates per-byte CPU. Then
+restrict verification to chunk copies and adopt hash verification only with a
+written collision analysis.
+
+## D-016: C brotli is the performance baseline; the baseline is the reference quality curve; success is a Pareto improvement; the cold path is q2-class  (2026-10-21, status: accepted)
+
+**Decision.** This amends D-003 (C used only as a one-time cross-check), D-014
+(cold path) and D-015 (baseline set).
+
+- The CPU baseline is C `google/brotli` at a pinned release/commit, not
+  rust-brotli. C is the gold standard deployments actually run. It is built
+  with clang at documented flags and driven by a thin harness that issues the
+  same `BrotliEncoderCompressStream` call and flush sequence as every other
+  encoder under test. rust-brotli at the fork's base commit is measured
+  alongside it on every report, so the port's size and CPU differences per
+  quality are visible. chunky CPU claims are stated against C. C brotli also
+  supplies the with-dictionary baseline (`BrotliEncoderPrepareDictionary`
+  exists in the local 1.1.0).
+- For Worker numbers, the same pinned C source is also compiled to wasm32
+  (as dictionary-worker did with emscripten) and timed in V8 next to the
+  rust-brotli and chunky wasm builds.
+- Baselines span the quality curve from q0 to q11 (at least q1–q6, q9 and
+  q11), on identical bytes and logical flush schedules. Report them buffered
+  and with flushes. Report each
+  quality's effective match reach as well. q0/q1 match only within the
+  current input fragment: never across `CompressStream` calls or flushes, and
+  not at long distances even in a single feed (RE-002). Setting the same
+  `lgwin` does not equalize them.
+- chunky succeeds only if its (size, CPU) point is a Pareto improvement over
+  that measured curve on held-out data: smaller output than the reference at
+  equal or lower CPU, or lower CPU at equal size. The q1→q11 gap-recovery
+  fraction remains a diagnostic. Aggregate it byte-weighted per route and
+  report per-response distributions.
+- When a corpus response was served with a dictionary, also report the
+  served bytes and the reference curve with that dictionary attached (Shared
+  Brotli, with dcb framing bytes counted).
+- The cold-path, rejected-model and fallback encoder is reference q2-class:
+  a persistent hasher that matches across flushes. M1 numbers pick the exact
+  quality. Its memory is reserved like any other stream's (D-014).
+- M1 decomposes the q1→q11 gap using reference-encoder settings (context
+  modeling on/off, q9 vs q11 parsing, lgwin, static-dictionary share). The
+  owner uses that breakdown to decide whether the route model (M4) is built
+  before the parse cache (M3).
+
+**Context.** A local probe against C brotli 1.1.0 (RE-002) showed that
+q0/q1 never match across input calls. Under per-read flushing, q1 therefore
+inflates the gap and makes a poor fallback. The vision notes that CDNs
+already run q4–q5, so "recovers X% of the q1 gap" can look like success while
+losing to q5 at the same CPU. design.md calls context modeling the largest
+single part of the gap, yet the original ladder built the parse cache first.
+
+**Consequences.** Baseline/bench tools sweep qualities for both C and
+rust-brotli and record the C version, compiler and flags. C brotli (MIT) is a
+benchmark tool, not a dependency of the core or the Worker; check the
+license metadata of any FFI crate used to call it (D-005). If rust-brotli is
+materially slower than C at the same quality, chunky has to make up that
+difference too, and the report shows it. The cold path,
+fallback reservations and the success criteria in vision.md change
+accordingly.
+
+**Reopen if.** q2 costs materially more than q1 per flush in wasm. A
+q1-speed path with a persistent hasher could then be built in the fork.
+
+## D-015: Evaluate frozen artifacts on later captures; establish per-flush encoding before single-block experiments  (2026-10-21, status: accepted; baseline set amended by D-016)
 
 **Decision.** Training, tuning and evaluation captures are separate and ordered
 in time. Freeze the route model, parse cache and cut rules before evaluating
@@ -61,7 +244,7 @@ claimed achieved by this planning change.
 **Reopen if.** Held-out results or deployment measurements justify a different
 order or evaluation protocol; retain a separate unbiased evaluation slice.
 
-## D-014: Determinism includes flushes and options; fallback follows stream state; memory is bounded per isolate  (2026-10-21, status: accepted)
+## D-014: Determinism includes flushes and options; fallback follows stream state; memory is bounded per isolate  (2026-10-21, status: accepted; cold path amended by D-016, reservation basis by D-017)
 
 **Decision.** Amend D-008/D-011 as follows:
 
@@ -101,7 +284,7 @@ Live request bodies, fingerprints and histograms do not enter training (D-013).
 **Reopen if.** A different determinism contract or bounded continuation is
 needed. Resource-failure aborts must remain distinguishable from valid EOF.
 
-## D-013: Approved public sources and eligible spans govern all learning  (2026-10-21, status: accepted)
+## D-013: Approved public sources and eligible spans govern all learning  (2026-10-21, status: accepted; D-018 proposes a source-specific amendment)
 
 **Decision.** Supersede D-009's N-session privacy claim. Initial learning is
 offline and uses only operator-approved public corpus sources with explicit
@@ -135,7 +318,7 @@ secret-slot feature is a mitigation, not a security proof.
 **Reopen if.** Learning from private traffic becomes a requirement and a
 concrete authorization and information-flow design replaces this exclusion.
 
-## D-012: Exact decoded bytes, per-flush baseline, and separate br/dcb format contracts  (2026-10-21, status: accepted)
+## D-012: Exact decoded bytes, per-flush baseline, and separate br/dcb format contracts  (2026-10-21, status: accepted; D-010 since culled, surviving items in D-017)
 
 **Decision.** Amend D-002 and D-010 items 1/2/3/5:
 
@@ -177,119 +360,7 @@ on both sides of window saturation and validate dcb negotiation/framing in M8.
 changing decoded bytes or violating the delivery target. Content-transforming
 padding would require separate explicit scope; it is not an encoder fallback.
 
-## D-011: Worker shared state is immutable per model version; per-stream window memory is demand-paged; origin Content-Length requires unencoded check  (2026-10-21, status: accepted; amended by D-013/D-014)
-
-**Decision.**
-1. **Immutable runtime state per model version.** In the Worker deployment,
-   the parse cache, route models and dictionary sidecars loaded by an isolate
-   are immutable for a given versioned blob. `waitUntil` only records telemetry
-   and samples out-of-band; upgrade parses and model rebuilds happen offline
-   and ship as a new versioned blob.
-2. **Demand-grown per-stream window buffers and zero-copy dictionaries.**
-   `chunky-core` grows per-request window buffers on demand (starting small for
-   HTML/JSON) rather than pre-allocating `1 << lgwin` (4–16 MB) per active
-   stream, and references CDT dictionary bytes directly from the shared
-   immutable dictionary buffer.
-3. **Origin header handling under transparent decompression.** Because
-   Cloudflare's subrequest `fetch()` transparently decompresses `br`/`gzip`
-   bodies while leaving the origin's `Content-Encoding` and compressed
-   `Content-Length` headers intact, the Worker treats `Content-Length` as a
-   known uncompressed `MLEN` only when `originResponse.headers` has no
-   `Content-Encoding`. On re-compressed responses, `Content-Length` is stripped
-   and strong `ETag`s are converted to weak (`W/...`) per RFC 9110 §8.8.3.
-
-**Context.** M0 design review of [architecture.md](architecture.md) and
-[design.md](design.md). Mutating parse caches in-isolate breaks cross-instance
-determinism and leaks isolate cache state via response size. Pre-allocating 4 MB
-windows across 30+ concurrent slow-streaming origin fetches would OOM the 128 MB
-Worker isolate limit (wasm linear memory never shrinks). Treating a gzipped
-origin's `Content-Length` as uncompressed `MLEN` would corrupt meta-block
-headers.
-
-**Consequences.** Open question 4 is simplified: M1–M7 need no Durable Objects
-or Queues for live cache mutation. `chunky-core` window management must separate
-logical `lgwin` from physical buffer capacity.
-
-**Reopen if.** Offline-only model refreshes prove too slow for rapidly
-changing templates and an in-process or edge-coordinated upgrade loop is needed.
-
-## D-010: RFC 7932 format invariants for stitched commands and one-meta-block streaming  (2026-10-21, status: accepted; items 1/2/3/5 amended by D-012)
-
-**Decision.** Five format and stitcher invariants refine [design.md](design.md):
-1. **Mid-meta-block flushes end on a copy, and alignment fallback splits the
-   tail copy.** In RFC 7932, every command before `MLEN` is reached is an
-   `(insert_length, copy_length >= 2)` pair with `copy_length` encoded before
-   the literals; standalone literal inserts exist only at the exact end of a
-   meta-block. Mid-meta-block flushes must end at the completion of a copy (any
-   unmatched trailing bytes wait in lookahead until the next flush). When the
-   byte-alignment lottery misses, the fallback splits the final copy so its tail
-   is a 2–4 byte copy (`insert = 0, copy = 2..4`), delaying at most 2–4 bytes.
-2. **Open-ended meta-block tables are unpruned and universal.** Because a
-   meta-block has no End-of-Block symbol and cannot exit before `MLEN`, tables
-   emitted at the start of a one-meta-block stream cannot be pruned to present
-   symbols (unlike buffered or per-flush meta-blocks). They must assign
-   non-zero code lengths (`1..=15`) to all 256 literal bytes (in the active or
-   a reachable fallback block type) and cover a universal basis of command and
-   distance symbols up to `lgwin`.
-3. **Shortfall padding emits a literal newline before a `distance = 1` copy, and
-   `text/event-stream` stays per-flush.** Because `distance = 1` repeats the
-   last response byte (`>` or `}`), a shortfall of $S = 1$ emits one literal
-   `\n` (`0x0A`) and $S \ge 2$ emits one literal `\n` plus a `distance = 1`
-   copy of length $S - 1$. Using `\n` instead of spaces avoids breaking
-   line-splitting `application/x-ndjson` parsers (`JSON.parse("   ")`).
-   `text/event-stream` uses per-flush meta-blocks so padding never triggers
-   SSE event dispatch.
-4. **Chunk-anchored references are strictly contained within their target
-   chunk (`offset + length <= len(target_chunk)`), and upgrade parses run over
-   composite admitted-chunk windows.** Cross-chunk matches during training are
-   split at chunk boundaries (and re-coalesced by the stitcher when those
-   chunks remain contiguous), preventing silent corruption when a dynamic slot
-   is inserted between two template chunks. Upgrade/training `q11` runs over a
-   sequence of admitted chunks on the route (never isolated 256 B chunks, which
-   miss cross-chunk refs, and never raw unredacted responses, which would
-   match into private data).
-5. **Distance short codes (`0..15`), literal contexts (`p1`, `p2`) and
-   static-dictionary wire offsets are resolved at stitch time.** Cache entries
-   and `.br`-recovered parses store logical references and explicit distances;
-   short-code substitution against the 4-entry distance ring buffer and
-   `max_distance` offsetting (`+ cdt_dict_size`) happen during stitching.
-
-**Context.** M0 technical review of [design.md](design.md) against RFC 7932.
-Each item above fixes a case where a literal reading of the initial design
-would produce an unencodable stream or silent decoder corruption.
-
-**Consequences.** Updated in [design.md](design.md), [architecture.md](architecture.md),
-[features.md](features.md) and [plan.md](plan.md). Round-trip and differential
-tests in M2–M5 should specifically exercise these edge cases.
-
-**Reopen if.** Never for RFC 7932 rules; padding or MLEN heuristics may be
-tuned once M5 flush-replay numbers are in hand.
-
-## D-009: Admission gate is the single privacy boundary; secret slots are literal-only  (2026-10-21, status: superseded by D-013)
-
-**Decision.** Response-derived content (parse-cache entries, generated
-dictionary contents, offline training samples) enters shared state only after
-being seen across N distinct sessions. Private responses (`Cache-Control:
-private`, `Set-Cookie`, request `Authorization`) tighten the gate, and
-multi-tenant deployments partition state per tenant. Secret slots (from
-template hints, or from high-entropy token detection when there are no hints)
-are emitted as literals and are never indexed or used as match-verification
-targets.
-
-**Context.** From the design doc's Security and privacy section and decisions
-table. A shared cache creates timing and BREACH-style channels that stateless
-compression does not have.
-
-**Consequences.** Every new path that writes shared state must go through the
-gate, with no side doors for "just the model" or "just stats". The value of N
-and how it varies with privacy signals are still open (features.md). In the
-Worker deployment, "distinct sessions" needs a concrete definition that works
-without storing user identifiers.
-
-**Reopen if.** A formal analysis shows a cheaper boundary with equal
-guarantees, or the gate makes hit rates on the target corpus too low to matter.
-
-## D-008: Hot path reads; finalization records; learning computes off-request  (2026-10-21, status: accepted; amended by D-013/D-014)
+## D-008: Hot path reads; finalization records; learning computes off-request  (2026-10-21, status: accepted; amended by D-013/D-014/D-016)
 
 **Decision.** The per-request compression path only reads shared state (parse
 cache, route model, dictionary sidecars). The post-stream pass only records.
@@ -311,7 +382,7 @@ path as a first-class configuration.
 valuable enough inline that its exclusion costs more than the predictability
 gains.
 
-## D-007: Measurement corpus comes from logged-out public crawls, stored outside the repo  (2026-10-21, status: accepted)
+## D-007: Measurement corpus comes from logged-out public crawls, stored outside the repo  (2026-10-21, status: accepted; D-018 proposes manual netlog capture of Google Search)
 
 **Decision.** The measurement corpus is built by crawling public templated
 sites while logged out (no cookies, no credentials). Responses are stored in a
@@ -401,7 +472,7 @@ spike).
 a way that defeats the streaming layout, or Worker CPU/memory limits make the
 design unworkable there.
 
-## D-003: Rust workspace; encoder forked from Dropbox rust-brotli  (2026-10-21, status: accepted)
+## D-003: Rust workspace; encoder forked from Dropbox rust-brotli  (2026-10-21, status: accepted; C baseline role amended by D-016)
 
 **Decision.** The core encoder library, the CLI tools and the Worker's wasm
 module are Rust, in one Cargo workspace. The Worker uses the same core

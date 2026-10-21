@@ -28,7 +28,7 @@ What else is in or out of scope is being triaged in
 
 **Pre-code, milestone M0 (planning).** No code exists yet. The first
 measurement milestone measures reuse on later responses held out from training,
-against matched q1/q4/q11 baselines. See [docs/plan.md](docs/plan.md).
+against the full reference brotli quality curve. See [docs/plan.md](docs/plan.md).
 
 ## How it's built
 

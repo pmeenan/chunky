@@ -33,6 +33,11 @@ review structure, and no verification-of-the-verification.
   changes you didn't make, you're iterating on in-flight work, not starting
   fresh.
 - **Scratch files stay out of the tree.**
+- **Shared measurement hosts.** If the machine uses `hostlock` (see the user's
+  instructions), run builds and test suites under `hostlock shared`. CPU
+  benchmarks are measurements, so run them under `hostlock exclusive` so other
+  heavy work cannot skew them. Size-only measurements are deterministic and
+  need only a shared hold.
 - **Fix the docs the change makes wrong** (status paragraph, plan checkbox,
   affected doc) in the same change. Nothing more is owed.
 
