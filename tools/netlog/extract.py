@@ -16,7 +16,7 @@ pages (D-018, D-022). Other documents in the netlog are skipped.
 
 usage: python3 -I tools/netlog/extract.py <netlog.json> <out_dir> <flushscan_binary>
 e.g.   python3 -I tools/netlog/extract.py data/netlogs/google-search.json \
-           data/corpus/google-search/2026-10-21 tools/netlog/flushscan/target/release/flushscan
+           data/corpus/sessions/2026-10-21 tools/netlog/flushscan/target/release/flushscan
 
 Needs the system libbrotlidec (C brotli >= 1.1.0, for dictionary attach).
 Raw netlogs hold credential-equivalent data: keep them and all output under
@@ -148,6 +148,8 @@ def main(netlog, out_dir, flushscan):
         elif ce == 'gzip':
             assert zlib.decompress(served, 16 + zlib.MAX_WBITS) == decoded, 'gzip decode != netlog decoded bytes'
             verified = 'zlib'
+            hdr = gzip_header_len(served)
+            flushes = recover_gzip_flushes(served, hdr, decoded, r['raw'], report)
         elif ce in (None, 'identity'):
             assert served == decoded
             verified = 'identity'
@@ -165,7 +167,10 @@ def main(netlog, out_dir, flushscan):
         q = urllib.parse.parse_qs(u.query)
         low = decoded[:200000].lower()
         flags = [f for f, hit in (('consent', b'consent.google.com' in low and b'<form' in low and len(decoded) < 200000),
-                                  ('captcha', u.path.startswith('/sorry') or b'unusual traffic' in low or b'captcha-delivery' in low)) if hit]
+                                  ('captcha', u.path.startswith('/sorry') or b'unusual traffic' in low or b'captcha-delivery' in low),
+                                  # Google's JavaScript-check interstitial: served before the real results
+                                  # page (which follows with &sei=); it is not a results page.
+                                  ('interstitial', site == 'google' and b'id="rso"' not in decoded and b'/httpservice/retry/enablejs' in decoded)) if hit]
         device = ' mobile' if first(r['req'], 'sec-ch-ua-mobile') == '?1' else ' desktop'
         manifest.write(json.dumps({
             'manifest_version': 1, 'id': r['id'],
@@ -222,6 +227,62 @@ def recover_flushes(stream, dictionary, decoded, hdr, raw_reads, flushscan, repo
             report['read boundary decodable'] += ok
             report['read boundary decodable but missed'] += ok and off not in fs
             report['read boundary mid-block'] += not ok
+    return flushes
+
+
+def gzip_header_len(b):
+    """Length of the gzip member header (RFC 1952) before the deflate stream."""
+    assert b[:2] == b'\x1f\x8b' and b[2] == 8, 'not a gzip/deflate member'
+    flg, i = b[3], 10
+    if flg & 4:
+        i += 2 + int.from_bytes(b[i:i + 2], 'little')
+    for bit in (8, 16):
+        if flg & bit:
+            i = b.index(b'\0', i) + 1
+    if flg & 2:
+        i += 2
+    return i
+
+
+def gzip_boundary(served, hdr, decoded, k):
+    """Decoded offset if served[:k] ends at a byte-aligned deflate block boundary, else None.
+
+    Exact check: a fresh raw inflater primed with the preceding 32 KiB of output
+    must reproduce the rest of the body from served[k:]. That only works at a
+    real block boundary (a sync/full flush), not at a chance 00 00 ff ff.
+    """
+    n = len(zlib.decompressobj(16 + zlib.MAX_WBITS).decompress(served[:k]))
+    try:
+        d = zlib.decompressobj(-zlib.MAX_WBITS, zdict=decoded[max(0, n - 32768):n])
+        rest = d.decompress(served[k:]) + d.flush()
+    except zlib.error:
+        return None
+    return n if decoded[:n] + rest == decoded else None
+
+
+def recover_gzip_flushes(served, hdr, decoded, raw_reads, report):
+    """Server flush points in a gzip body: byte-aligned block ends after a sync/full flush."""
+    flushes, k = [], served.find(b'\x00\x00\xff\xff', hdr)
+    while k >= 0:
+        end = k + 4
+        if end < len(served) - 8:
+            n = gzip_boundary(served, hdr, decoded, end)
+            if n is None:
+                report['gzip candidate rejected'] += 1
+            elif not flushes or flushes[-1][1] != n:
+                flushes.append((end - hdr, n))
+        k = served.find(b'\x00\x00\xff\xff', k + 1)
+    if not flushes or flushes[-1][1] != len(decoded):
+        flushes.append((len(served) - 8 - hdr, len(decoded)))   # end of the final block, before the trailer
+    fs = {f[0] + hdr for f in flushes}
+    off = 0
+    for _, b in raw_reads:
+        off += len(b)
+        if hdr < off < len(served) - 8:
+            ok = gzip_boundary(served, hdr, decoded, off) is not None
+            report['gzip read boundary at flush'] += ok
+            report['gzip read boundary at flush but missed'] += ok and off not in fs
+            report['gzip read boundary mid-block'] += not ok
     return flushes
 
 

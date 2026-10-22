@@ -385,12 +385,24 @@ timing in V8 turns out unrepresentative of the Worker.
     the list. It starts at google.com, runs the panel and fresh queries, then
     the Etsy categories and a few listings discovered from each. Pauses are
     8–20 s, and at least 10 s on Etsy.
-  - It stops at the first `/sorry/`, CAPTCHA or block page.
-  - The list and the extension zip are published at
-    `https://chunky.meenan.dev/capture/` (`tools/capture/deploy.sh`, from
-    `tools/netlog/panel.txt` and `etsy.json`). The page also lists the
-    links in order for clicking by hand. DevTools emulation is per tab, so
-    new windows need emulation turned on again.
+  - It stops at the first `/sorry/`, CAPTCHA or block page. The extension
+    needs `<all_urls>` host access so it can inspect any listed site.
+  - The list is server-driven. `tools/capture/build_list.py` turns
+    `tools/netlog/panel.txt` and `etsy.json` into `capture.json`, which
+    holds:
+    - page groups in order;
+    - per-page link discovery (host plus path pattern, count);
+    - the fresh-query URL template;
+    - pause defaults;
+    - challenge rules: URL pattern, provider frames, and a text pattern
+      judged only on short pages.
+
+    `tools/capture/deploy.sh` publishes it with the extension zip and a
+    click-through page at `https://chunky.meenan.dev/capture/`. The
+    extension runs whatever the list says and caches the last copy. Changing
+    the list never requires a new extension.
+  - DevTools emulation is per tab, so pages opened in new windows need
+    emulation turned on again.
   - An automated headless trial from the build host was challenged on its
     first Google query and was dropped.
 - **Session metadata.** Record a `session.json` beside the manifest: capture
@@ -439,6 +451,14 @@ timing in V8 turns out unrepresentative of the Worker.
 
   Values unique to one response (signed parameters, thumbnail ids) cannot
   become cache entries. They need no special rule beyond (1).
+
+  The first two sessions showed rule (3) also catches deploy markers (JS
+  bundle build ids) alongside secrets. Treat both as excluded spans for
+  learning, and use build-id changes as template-change markers.
+- **Interstitials.** Google can serve a JavaScript-check interstitial
+  (`/httpservice/retry/enablejs`, no results container) before a query's
+  results page. The extractor flags it as `interstitial`, and it is excluded
+  from every slice.
 - **Manifest format v1.**
   - One directory per session: `manifest.jsonl`, `session.json`,
     `bodies/<sha256>.html`, `served/<id>.<encoding>` and

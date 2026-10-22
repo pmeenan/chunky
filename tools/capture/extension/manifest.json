@@ -1,16 +1,15 @@
 {
   "manifest_version": 3,
   "name": "chunky capture",
-  "version": "0.2.0",
-  "description": "Steps one tab through the chunky capture list (D-022): Google Search queries, then Etsy categories and a few listings from each, human-paced, stopping at any challenge page.",
+  "version": "0.3.0",
+  "description": "Steps one tab through the chunky capture list published at chunky.meenan.dev/capture/capture.json (D-022), human-paced, stopping at any challenge page.",
   "permissions": [
     "tabs",
     "storage",
     "scripting"
   ],
   "host_permissions": [
-    "https://chunky.meenan.dev/*",
-    "https://www.etsy.com/*"
+    "<all_urls>"
   ],
   "background": {
     "service_worker": "background.js"

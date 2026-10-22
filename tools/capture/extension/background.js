@@ -1,12 +1,13 @@
-// Steps one tab through a list of items. Each item loads to completion, then
-// the worker waits a random min..max seconds (at least `minDelay` for that
-// item) before the next. An Etsy category item can discover a few listing
-// links, which run next. Any challenge page stops the run. Delays stay under
-// 30 s so the service worker never idles out between steps.
+// Generic runner for the server-published capture list (capture.json).
+// Steps one tab through items in order. Each item loads to completion, is
+// inspected for challenge pages (patterns come from the list), optionally
+// discovers links to visit next, then the worker waits a random pause (at
+// least the item's minDelay) before the next item. Pauses stay under 30 s so
+// the service worker never idles out between steps.
 //
-// Item: { url, minDelay?, discover? } where discover = number of listings.
+// Item: { url, minDelay?, discover?: { count, host, path_pattern } }
 
-const state = { running: false, tabId: null, items: [], i: 0, min: 8, max: 20, status: 'idle', waiting: false, timer: null };
+const state = { running: false, tabId: null, items: [], i: 0, min: 8, max: 20, challenge: null, status: 'idle', waiting: false, timer: null };
 
 const publish = () =>
   chrome.storage.session.set({ state: { running: state.running, i: state.i, total: state.items.length, status: state.status } });
@@ -32,29 +33,30 @@ async function step() {
   }
 }
 
-// Runs in the page: challenge detection and (for Etsy categories) listing links.
-function inspectPage() {
-  const text = (document.title + ' ' + (document.body ? document.body.innerText.slice(0, 4000) : '')).toLowerCase();
-  const challenge = /unusual traffic|not a robot|captcha|access is temporarily restricted|blocked|verify you are human/.test(text) ||
-    !!document.querySelector('iframe[src*="captcha"]');
-  const links = [...document.querySelectorAll('a[href*="/listing/"]')].map((a) => a.href);
-  return { challenge, links };
+// Runs in the page: challenge check and candidate links. Text is only judged
+// on short pages, so ordinary pages that mention CAPTCHAs never stop a run.
+function inspectPage(c) {
+  const body = document.body ? document.body.innerText : '';
+  const frames = [...document.querySelectorAll('iframe[src], script[src]')].map((e) => e.src);
+  const challenge = frames.some((src) => new RegExp(c.frame_pattern, 'i').test(src)) ||
+    (body.length <= c.max_text_length && new RegExp(c.text_pattern, 'i').test(document.title + ' ' + body));
+  return { challenge, links: [...document.querySelectorAll('a[href]')].map((a) => a.href) };
 }
 
-// Plain /listing/<id>/<slug> paths only: no query strings (robots.txt
-// disallows several parameters) and no /stubs/.
-function listingUrls(links, n) {
+// Same-host links whose path matches the pattern, reduced to origin + path
+// (no query strings or fragments), deduplicated, at most `count`.
+function discoverLinks(links, rule) {
+  const re = new RegExp(rule.path_pattern);
   const out = [];
   for (const h of links) {
     try {
       const u = new URL(h);
-      const m = u.pathname.match(/^\/listing\/\d+\/[^/]+$/);
-      if (u.hostname === 'www.etsy.com' && m) {
-        const clean = `https://www.etsy.com${u.pathname}`;
+      if (u.hostname === rule.host && re.test(u.pathname)) {
+        const clean = `${u.origin}${u.pathname}`;
         if (!out.includes(clean)) out.push(clean);
       }
     } catch {}
-    if (out.length >= n) break;
+    if (out.length >= rule.count) break;
   }
   return out;
 }
@@ -64,26 +66,25 @@ chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
   if (!tab.url || tab.url === 'about:blank') return;
   state.waiting = false;
   const item = state.items[state.i];
-  if (/\/sorry\/|captcha|challenge/i.test(tab.url)) {
-    return finish(`stopped: challenge page at ${state.i + 1}/${state.items.length}; capture is complete up to the previous page`);
+  const where = `${state.i + 1}/${state.items.length}`;
+  if (new RegExp(state.challenge.url_pattern, 'i').test(tab.url)) {
+    return finish(`stopped: challenge page at ${where}; capture is complete up to the previous page`);
   }
-  if (/^https:\/\/www\.etsy\.com\//.test(tab.url)) {
-    let page;
-    try {
-      [{ result: page }] = await chrome.scripting.executeScript({ target: { tabId }, func: inspectPage });
-    } catch (e) {
-      return finish(`stopped: could not inspect Etsy page (${e.message})`);
-    }
-    if (page.challenge) return finish(`stopped: Etsy challenge or block at ${state.i + 1}/${state.items.length}`);
-    if (item.discover) {
-      const found = listingUrls(page.links, item.discover).map((url) => ({ url, minDelay: item.minDelay }));
-      state.items.splice(state.i + 1, 0, ...found);
-    }
+  let page;
+  try {
+    [{ result: page }] = await chrome.scripting.executeScript({ target: { tabId }, func: inspectPage, args: [state.challenge] });
+  } catch (e) {
+    return finish(`stopped: could not inspect page ${where} (${e.message})`);
+  }
+  if (page.challenge) return finish(`stopped: challenge or block page at ${where}; capture is complete up to the previous page`);
+  if (item.discover) {
+    const found = discoverLinks(page.links, item.discover).map((url) => ({ url, minDelay: item.minDelay }));
+    state.items.splice(state.i + 1, 0, ...found);
   }
   state.i++;
   if (state.i >= state.items.length) return finish(`done: ${state.items.length} pages`);
   const next = state.items[state.i];
-  const lo = Math.max(state.min, next.minDelay || 0);
+  const lo = Math.min(25, Math.max(state.min, next.minDelay || 0));
   const hi = Math.min(25, Math.max(lo, state.max));
   const ms = (lo + Math.random() * (hi - lo)) * 1000;
   state.status = `loaded ${state.i}/${state.items.length}; next in ${Math.round(ms / 1000)} s`;
@@ -105,6 +106,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
       i: 0,
       min: Math.max(3, msg.min),
       max: Math.min(25, Math.max(msg.min, msg.max)),
+      challenge: msg.challenge,
     });
     step();
   } else if (msg.cmd === 'stop') {

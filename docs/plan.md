@@ -137,7 +137,35 @@ relaxes private/Set-Cookie ineligibility for offline prototype artifacts. No enc
       listings. Second sources: Wikimedia and Shopify storefronts from Common
       Crawl (owner's choice). Sample measurements wait until Common Crawl's CDN
       stops throttling this host (RE-008). Etsy stays in each capture session
-      unless it blocks the owner's browser too. Span survey of the first
+      unless it blocks the owner's browser too.
+
+      First extension session, 2026-10-22 (`data/corpus/sessions/`): 24
+      Google pages (dcb) and 48 Etsy pages (gzip), all decode-verified, with
+      no missed flush boundaries. Indicative numbers (one or two sessions,
+      throwaway probe):
+      - **Google, day 2 vs day 1:** 27.3% of day-2 bytes are in 256 B chunks
+        from the same query's day-1 page, and 29.6% from any day-1 page. Within
+        day 1 across queries it was 21.9%.
+      - **Etsy:** 61.5% of bytes are in chunks seen earlier in the session
+        (listings 68.4%, categories 42.1%). Buffered q2 is 1.321x q11 (q1
+        1.448x, q5 1.157x, q9 1.125x). Etsy served gzip at 5.25 MB, 1.39x our
+        q11.
+      - **Etsy does not stream.** Each body arrives in one burst of about
+        5–40 ms after 0.7–2.4 s of generation. The gzip streams carry no
+        sync-flush points (none of 213 read boundaries is byte-aligned), so
+        Etsy belongs to the buffered-response mode.
+      - **gzip flush recovery:** the extractor finds `00 00 ff ff` sync/full
+        flushes and validates each by re-inflating the remainder from the
+        preceding 32 KiB of output. It was verified on a synthetic stream.
+      - **Session-scoped tokens:** cross-session diff finds 11–20 per session
+        (JS build ids, `sig=` parameters, form values). M1 must separate
+        deploy markers from secrets.
+      - **Google interstitial:** the first query got its JavaScript-check
+        interstitial before the results, which the extractor now flags and
+        analyses exclude.
+      - **Second Google dictionary:** a 205 KB `match="/*"` dictionary came
+        from the google.com home page and was used until the `/search*`
+        dictionary arrived. Span survey of the first
       session: named per-response carriers are about 1.7% of decoded bytes;
       the `DV` cookie value is echoed in every page; `sca_esv` repeats within
       the session. `manifest.jsonl` from the extraction spike is the draft

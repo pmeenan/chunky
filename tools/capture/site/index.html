@@ -26,7 +26,7 @@
 <body>
 <main>
   <h1>chunky capture list</h1>
-  <p>Google Search capture session for chunky (D-022). Panel version <span id="ver">…</span>.</p>
+  <p>Capture session list for chunky (D-022), served from <code>capture.json</code>. List version <span id="ver">…</span>.</p>
 
   <div class="card">
     <strong>Prefer the extension.</strong>
@@ -61,13 +61,20 @@
     get(k, d) { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } },
     set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
   };
-  let panel = [];
-  let etsy = { categories: [], listings_per_category: 0 };
+  let list = null;
   function render() {
-    const queries = [...panel, ...lines($('fresh').value)];
+    const fresh = lines($('fresh').value);
     const done = new Set(store.get('done', []));
-    const items = [['google.com (start here)', 'https://www.google.com/'], ...queries.map((q) => [q, 'https://www.google.com/search?q=' + encodeURIComponent(q)]),
-      ...etsy.categories.map((u) => [`Etsy ${u.split('/c/')[1]}: then open ${etsy.listings_per_category} listings from it, 10 s or more apart`, u])];
+    const items = [];
+    for (const g of (list ? list.groups : [])) {
+      for (const it of g.items) {
+        const note = it.discover ? ` (then open ${it.discover.count} linked pages, ${g.min_delay || 0} s or more apart)` : '';
+        items.push([it.label + note, it.url]);
+      }
+      if (list.fresh && list.fresh.after_group === g.name) {
+        for (const q of fresh) items.push([q, list.fresh.url_template.replace('{q}', encodeURIComponent(q))]);
+      }
+    }
     const ol = $('links');
     ol.replaceChildren();
     for (const [label, href] of items) {
@@ -97,9 +104,9 @@
   $('fresh').value = store.get('fresh', '');
   $('fresh').addEventListener('input', () => { store.set('fresh', $('fresh').value); render(); });
   $('reset').addEventListener('click', () => { store.set('done', []); render(); });
-  fetch('queries.json', { cache: 'no-store' })
+  fetch('capture.json', { cache: 'no-store' })
     .then((r) => r.json())
-    .then((j) => { panel = j.panel; if (j.etsy) etsy = j.etsy; $('ver').textContent = j.version; render(); })
+    .then((j) => { list = j; $('ver').textContent = j.version; render(); })
     .catch(() => { $('ver').textContent = 'unavailable'; render(); });
 </script>
 </body>
