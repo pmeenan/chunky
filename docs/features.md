@@ -62,7 +62,7 @@ or optional tools remain proposed or scoped to later milestones.
 
 | Feature | Status | Notes |
 | --- | --- | --- |
-| Netlog extraction script: turns manually captured browser netlogs into cookie-stripped manifests (headers, encoded and decoded bodies, arrival timings, served encoding, dictionary hash) plus extracted dictionaries in the local data dir | confirmed | D-018 (proposed) for the initial Google Search corpus; capture is manual, with no crawler or proxy; raw netlogs never leave `data/` |
+| Netlog extraction script: turns manually captured browser netlogs into cookie-stripped manifests (headers, encoded and decoded bodies, arrival timings, served encoding, dictionary hash) plus extracted dictionaries in the local data dir | confirmed | D-018 for the initial Google Search corpus; capture is manual, with no crawler or proxy; raw netlogs never leave `data/` |
 | Corpus crawler for further sites: logged-out polite crawl | confirmed | D-007; needed only for a second site, unless Common Crawl is used instead |
 | Served-stream flush recovery: decoded offsets of encoder flush boundaries in the served br/zstd stream, paired with arrival timestamps | confirmed | D-018; supplies logical flush schedules for baselines and M5 replay, independent of transport fragments |
 | Route-labeling tool: cluster captured URLs into routes (path templates; for Google Search, `/search` plus vertical and device class) | confirmed | Third-party captures carry no route ids (D-007); every per-route metric in M1+ depends on this |
@@ -84,16 +84,16 @@ or optional tools remain proposed or scoped to later milestones.
 | Worker proxy: fetch from origin, compress eligible responses with the wasm core, return with `encodeBody: "manual"`, strip `Content-Length` and weaken strong `ETag`s | confirmed | D-004, D-017. Prior art: the owner's [dictionary-worker](https://github.com/pmeenan/dictionary-worker) (Apache-2.0); see [architecture.md](architecture.md) |
 | Content negotiation: accept br only with nonzero quality; preserve Vary and bypass ineligible responses | confirmed | Verify original client encodings in Worker; cover HEAD, no-transform, 304/206 and existing encodings; dcb negotiation added in M8 |
 | Streaming delivery: flush available origin-read bytes using actual-length blocks with backpressure/cancellation | confirmed | D-012/D-014; reads are transport fragments, not stable application flush boundaries; paced-marker edge measurements in Q3 |
-| Flush policy knob: flush every read, coalesce already-available reads, or minimum bytes unless idle | confirmed | M5 measures header overhead against delivery latency; initial policy flushes every nonempty read. Transport-derived schedules are already outside the byte-determinism contract (D-014) |
+| Flush policy knob: flush every read, coalesce already-available reads, or minimum bytes unless idle | confirmed | M5 measures header overhead against delivery latency. The initial policy coalesces already-available reads: the M0 spike measured per-read flushing at +9–12% on decompressed origin reads with no latency gain (RE-007). Transport-derived schedules are already outside the byte-determinism contract (D-014) |
 | Mode selection from request/response headers (Sec-Fetch-Dest, Priority, unencoded Content-Length, Content-Type, Cache-Control) | confirmed | design: Response modes; D-017 |
 | Load immutable model/warm cache, pin per stream and bound refresh overlap | confirmed | Loader lands M4, Worker integration M6, fleet freshness/rollout M7 (D-015) |
 | State-dependent fallback: precommit alternate representation, healthy same-stream continuation, otherwise abort | confirmed | D-014; no fresh compressor or identity suffix after commitment; reserve even q1 fallback memory |
 | Strip origin-supplied template-hint headers before the response reaches the client | confirmed | Lets a cooperating origin pass hints via response headers at zero client wire cost (open question 6) |
-| Shadow / comparison mode: also compute the reference-encoder size off-path and log the delta | proposed | Optional M6+ diagnostic over ephemeral bytes; no training export or retained bodies, and reserve its CPU/memory budget (D-013/D-014) |
-| Debug response header (opt-in) reporting cache hit rate, mode, bytes saved | proposed | Optional M6+ diagnostic; off by default because it exposes learned state; D-013 |
-| Metrics via Workers Analytics Engine or logs: bounded aggregate CPU/byte/error counters | proposed | Optional M6+ destination; excludes URLs, content identifiers and training data (D-013) |
-| Kill switch / per-route enable list | proposed | Optional M6+ operational control |
-| Cache API storage of compressed output for cacheable (`public`) responses | proposed | Optional M6+/M8 optimization (`cache.put` in `waitUntil`) |
+| Shadow / comparison mode: also compute the reference-encoder size off-path and log the delta | confirmed | Optional M6+ diagnostic over ephemeral bytes; no training export or retained bodies, and reserve its CPU/memory budget (D-013/D-014) |
+| Debug response header (opt-in) reporting cache hit rate, mode, bytes saved | confirmed | Optional M6+ diagnostic; off by default because it exposes learned state; D-013 |
+| Metrics via Workers Analytics Engine or logs: bounded aggregate CPU/byte/error counters | confirmed | Optional M6+ destination; excludes URLs, content identifiers and training data (D-013) |
+| Kill switch / per-route enable list | confirmed | Optional M6+ operational control |
+| Cache API storage of compressed output for cacheable (`public`) responses | rejected (spike) | Not needed. The M0 Worker spike showed Workers Cache returns manual br byte-exact, and with `no-transform` the edge does not transcode it (RE-005). dcb needs the normalizing outer entrypoint or no edge caching (RE-006, D-021). Earlier notes, kept for context: Workers Cache (launched 2026-07-06; `"cache": {"enabled": true}` in wrangler config) caches Worker responses per RFC 9111 in front of the Worker; `Set-Cookie`/`Authorization` bypass it. Cloudflare rewrites incoming `Accept-Encoding` to `br, gzip`, so varying by encoding needs an outer entrypoint that restores `request.cf.clientAcceptEncoding`. The spike ran that check |
 
 ## Open questions (answer during M0)
 
@@ -105,9 +105,12 @@ fallbacks unblock the initial encoder; only the parked experiment needs Q1.
    remains unverified. Park this research with the exact-length single-block
    experiment after M5. Initial per-flush blocks need their own delivery checks;
    decoded whitespace padding is rejected, not a browser-compatibility question.
-2. **Can rust-brotli accept external commands without a deep fork?** Inspect
-   generation/writer separation, capture/reinject q11 and pick fork packaging.
-   *M0 source/round-trip spike.*
+2. **Can rust-brotli accept external commands without a deep fork?** Yes
+   (M0 spike, D-020). A ~150-line entry point takes external commands,
+   resolves short codes and calls the existing meta-block writer. Captured q11
+   parses round-trip through the C decoder in oracle, fast and per-flush modes.
+   Exact replay needs the captured short codes. `portable-float` is required
+   for native/wasm byte identity (RE-003).
 3. **Does the Worker edge deliver manually encoded per-flush br promptly?**
    Use paced origin markers and client arrival times over HTTP/2 and HTTP/3.
    Record arbitrary read fragmentation, the read-size distribution and JS/wasm
@@ -120,8 +123,10 @@ fallbacks unblock the initial encoder; only the parked experiment needs Q1.
    live learning and distinct-session identities are unnecessary (D-013).
    *M0 architecture choices and spike measurements.*
 5. **Is wasm CPU sufficient?** Measure reference and later cache-hit paths on
-   the corpus in V8 (workerd), not wasmtime; select a Workers plan and check
-   its current caps. Include
+   the corpus in V8 (workerd), not wasmtime. The plan is Workers Paid
+   (owner, 2026-10-21): CPU defaults to 30 s per request, up to 5 min via
+   `limits.cpu_ms` (docs checked 2026-10-21). The M0 spike measured about
+   9 ms (q2) and 19 ms (q5) of V8 encode per MB. Include
    per-flush CPU, cancellation and JS/wasm overhead. Hard runtime termination
    is not a recoverable fallback promise. *M1 baseline, M5/M6 validation.*
 6. **How do template hints reach the encoder?** An origin header or other
@@ -129,13 +134,13 @@ fallbacks unblock the initial encoder; only the parked experiment needs Q1.
    Third-party crawls have no hints, so evaluate with synthetic/cooperating
    origins. Literal-only secret hints do not prove table/context isolation.
    *M0 triage; D-013.*
-7. **Worker shell: thin JS plus wasm or workers-rs?** Use Q3 measurements to
-   choose the stream/cancellation and buffer-transfer interface. `waitUntil`
-   manages lifecycle, not a background CPU thread. *M0 Worker spike.*
+7. **Worker shell: thin JS plus wasm or workers-rs?** Thin JS with raw wasm
+   exports (D-021). Copies cost 2.5–6.7% of encode time in V8.
+   `waitUntil` manages lifecycle, not a background CPU thread.
 8. **Which approved public sites and capture splits?** The proposed first
    source is manually captured logged-out Google Search netlogs, with Google's
-   dictionary, extracted offline (D-018). It needs owner approval for the D-013
-   `Cache-Control: private`/Set-Cookie/cookie exception. Then settle the query
+   dictionary, extracted offline (D-018, accepted with its D-013 exception;
+   D-019 relaxes private/Set-Cookie ineligibility for prototype artifacts). Still to settle: the query
    mix, locale, session cadence, excluded-span rules, response counts and
    manifest format. Name
    chronological training/tuning/evaluation slices, duplicate-body reporting,

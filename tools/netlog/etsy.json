@@ -1,0 +1,14 @@
+{
+  "categories": [
+    "https://www.etsy.com/c/home-and-living",
+    "https://www.etsy.com/c/jewelry",
+    "https://www.etsy.com/c/clothing",
+    "https://www.etsy.com/c/art-and-collectibles",
+    "https://www.etsy.com/c/craft-supplies-and-tools",
+    "https://www.etsy.com/c/toys-and-games",
+    "https://www.etsy.com/c/weddings",
+    "https://www.etsy.com/c/bags-and-purses"
+  ],
+  "listings_per_category": 5,
+  "min_delay": 10
+}

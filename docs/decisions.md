@@ -30,10 +30,444 @@ Decision / Context / Consequences / Reopen if
 
 ---
 
-## D-018: Initial corpus: manually captured logged-out Google Search netlogs, extracted offline  (2026-10-21, status: proposed)
+## D-024: Artifacts ship inside the Worker bundle; fixed per-isolate stream slots; aggregate telemetry via Analytics Engine  (2026-10-21, status: accepted)
 
-**Decision (proposed by the owner; accepting it amends D-007 and D-013 for this
-one source).**
+**Decision (accepted by the owner; the numbers are initial caps that M6 must validate).**
+
+- **Blob delivery: bundle the artifacts.**
+  - The model, warm cache and any dictionary ship as data modules inside the
+    Worker script, so each deployment version carries one immutable artifact
+    set.
+  - Per-stream pinning and the old/new overlap come from Workers versioning:
+    new isolates load the new version, and in-flight requests keep their own.
+    No isolate ever holds two versions, so the refresh peak inside an isolate
+    disappears.
+  - Rollout and rollback use gradual deployments.
+  - Fall back to Static Assets (25 MiB per file, chunked) or R2 only if the
+    artifacts outgrow the bundle limit (64 MiB uncompressed on all plans since 2026-09-04) or the 1 s startup limit (limits docs checked 2026-10-21).
+- **Isolate budget (128 MB including wasm), in MiB:**
+
+  | Allocation | Cap |
+  | --- | --- |
+  | Application total | 96 |
+  | Runtime headroom | 32 |
+  | Shared artifacts, one version | 24 |
+  | wasm code and static tables | 8 |
+  | Stream pool | 64 |
+
+  The stream pool is about 4 full slots, or 6 with smaller fallback slots.
+- **One wasm instance per isolate with fixed stream slots.**
+  - Each slot is a reservation, allocated once to its high-water mark. wasm
+    memory never shrinks, so slot accounting replaces trust in GC timing.
+  - A full slot (16 MiB) holds a 4 MiB retained-history cap (lgwin 22, which
+    covers the 2.3 MB pages; lgwin 18 cost 7.8–22% in the M0 probe), hasher,
+    command and table scratch, and output queues.
+  - A small fallback slot (6 MiB) runs lgwin 18 q2-class.
+- **When no slot is free before commitment,** return the response with no
+  `no-transform`. Cloudflare's edge then compresses it with its own
+  br/zstd/gzip at no Worker memory cost (RE-005). This is the acceptable
+  alternate representation for D-014. dcb never takes this path (RE-006).
+- **Commitment interface (raw wasm exports, D-021).**
+
+  | Export | Behavior |
+  | --- | --- |
+  | `slot_admit(options) -> slot \| -1` | Precommit: reserve or refuse |
+  | `slot_in(slot, len) -> ptr` | Return the slot's input buffer |
+  | `slot_push(slot, len, op) -> out_len \| error code` | `op` is feed, flush or finish |
+  | `slot_out(slot) -> ptr` | Return the slot's output buffer |
+  | `slot_release(slot)` | Free the slot |
+
+  JS owns the state machine in architecture.md:
+  - Preparing until the Response is returned.
+  - Streaming after that. Any error from `slot_push` in Streaming errors the
+    body (Aborted), never a fresh stream.
+  - Completed after `finish`.
+  - Release is called on every path, including cancellation.
+- **Telemetry: Workers Analytics Engine, aggregate only.**
+  - Per request: route class, mode, encoding, outcome (completed, aborted,
+    fallback, bypass), input and output bytes, flush count, slot tier.
+  - No URLs, query strings or content identifiers (D-013).
+  - CPU time comes from Workers Observability (`$workers.cpuTimeMs`), not from
+    the data points.
+  - Limits checked 2026-10-21: 20 blobs, 20 doubles and 1 index per point; 250
+    points per invocation; 3 months of retention; sampled per index value. So
+    the index is the route class, never a per-request id.
+
+**Context.** In the M0 spike, peak wasm memory per encoder was 13.8 MiB (q2)
+and 19.9 MiB (q5) for rust-brotli at lgwin 22, and 8.4 MiB at q5 lgwin 18.
+V8 encode cost was about 9 ms per MB at q2 and 19 ms at q5. The owner is on
+Workers Paid, where CPU per request defaults to 30 s and can go up to 5 min.
+
+**Consequences.**
+
+- M4's loader parses bundled data modules; M7 uses Workers versions for
+  freshness.
+- M6 measures real isolate peaks under concurrent long-lived slow consumers.
+  It adjusts slot sizes and counts, and lowers the cap if runtime headroom
+  proves larger than 32 MiB.
+
+**Reopen if.** The artifacts exceed the bundle or startup limits, or measured
+runtime overhead leaves fewer than 3 full slots.
+
+## D-023: Toolchain: pinned stable Rust, edition 2024 workspace, vendored rust-brotli and C brotli v1.2.1, one check script locally and in CI  (2026-10-21, status: accepted)
+
+**Decision (accepted by the owner).**
+
+- **Rust.** `rust-toolchain.toml` pins 1.99.1 with rustfmt, clippy and
+  `wasm32-unknown-unknown`. The workspace uses edition 2024, resolver 3, and
+  `rust-version` equal to the pin. Raise the pin deliberately, never by
+  drifting. The vendored rust-brotli keeps its own edition 2015.
+- **Layout.**
+
+  | Path | Contents |
+  | --- | --- |
+  | `crates/brotli` | rust-brotli fork, git subtree of `6518a4e` plus our commits (D-020) |
+  | `crates/chunky-core` | Encoder core |
+  | `crates/chunky-formats` | Versioned on-disk formats |
+  | `crates/chunky-cli` | Binary `chunky` |
+  | `crates/chunky-wasm` | cdylib with the raw slot exports (D-021/D-024) |
+  | `crates/brotli-c` | FFI crate building the pinned C sources with the `cc` crate |
+  | `third_party/google-brotli` | git subtree of the pinned C release |
+  | `worker/` | JS shell, `wrangler.toml`, pinned `wrangler` in `package.json` |
+  | `tools/netlog/` | Python extractor |
+
+  The `brotli-decompressor` dependency stays on crates.io at `=6.0.1`.
+- **C baseline.** Pin google/brotli **v1.2.1** (released 2026-10-21; MIT).
+  - Native: clang `-O2 -DNDEBUG`, no `-march`, so it is comparable across
+    hosts. The exact flags are recorded in every report.
+  - wasm32: wasi-sdk 34 (Apache-2.0), run in V8 under Node's WASI shim.
+  - The harness calls it in process through `brotli-c`, with the same call and
+    flush sequence as the Rust paths. `brotli-c` also supplies the independent
+    reference decoder for tests (D-012).
+  - Master's q3/q4 dictionary search (`54f74c7f`) is not in any release.
+    Measure it only as a labeled extra curve.
+- **Checks.** `scripts/check.sh` runs, in order:
+  1. `cargo fmt --check`
+  2. `cargo clippy --workspace --all-targets -- -D warnings`
+  3. `cargo test --workspace`
+  4. The wasm32 build of `chunky-wasm` and the fork
+  5. `cargo deny check licenses bans`
+  6. `python3 -m py_compile` and `node --check` on `tools/`
+
+  GitHub Actions (`pmeenan/chunky`) runs the same script on push with
+  synthetic fixtures only (no corpus, no benchmarks). Locally it runs under
+  `hostlock shared`.
+- **Tests.** Unit and integration tests use `cargo test`; property tests use
+  `proptest`; differential tests decode with the C decoder through
+  `brotli-c`. `cargo-fuzz` (nightly) is optional from M3 and outside the
+  required checks. A native-vs-wasm byte-identity test runs the wasm build in
+  Node and is part of the checks from M2.
+- **License audit.** `deny.toml` allows only Apache-2.0, MIT, BSD-2-Clause,
+  BSD-3-Clause, ISC, Zlib and Unicode-3.0. Vendored trees keep their upstream
+  notices.
+- **Benchmarks.** `chunky bench` takes `hostlock exclusive` itself.
+  - It pins to one core with `taskset`, does warm-up runs, then reports the
+    median and MAD over at least 10 repetitions.
+  - Size-only runs need only a shared hold.
+  - Worker CPU figures come from production `$workers.cpuTimeMs`. Local
+    workerd and Node timings are relative A/B numbers only.
+- **Extractor.** It stays a Python script (stdlib plus ctypes `libbrotlidec`
+  1.1 or newer). `flushscan` moves into `chunky flushes` in M1, and the
+  script calls it.
+- **Host prerequisites.** `clang` and `lld` (apt), wasi-sdk 34 under
+  `~/.local`, Node 24, and `npx wrangler`.
+
+**Context.** The M0 spikes ran on rustc 1.99.1. clang 18.1.3 and lld were
+installed on 2026-10-21. Licenses were checked 2026-10-21 against crates.io and the
+GitHub API: cc, proptest, criterion, serde_json, anyhow, clap, sha2 and
+base64 are MIT OR Apache-2.0; cargo-deny is MIT OR Apache-2.0; wasi-sdk and
+binaryen are Apache-2.0.
+
+**Consequences.** M1 starts by creating this layout and the check script.
+Every report names the C tag and flags, the Rust pin, and the fork commit.
+
+**Reopen if.** A needed crate fails the license allowlist, or wasi-sdk C
+timing in V8 turns out unrepresentative of the Worker.
+
+## D-022: Corpus policy: panel plus fresh queries per session, sessions as the split unit, spans excluded by carrier, cookie match and cross-session diff  (2026-10-21, status: accepted)
+
+**Decision (accepted by the owner, 2026-10-21).**
+
+- **Capture basis.** The owner works at Google and has Google's permission to
+  capture Search automatically for this work. That replaces D-018's
+  manual-browsing argument for automation; D-013 eligibility is unchanged.
+- **Capture method: manual, extension-assisted.** The owner runs each session
+  in their own Chrome: a fresh incognito window, `chrome://net-export` with raw
+  bytes, and DevTools device mode set to Pixel 10 (dictionaries are used
+  reliably only on mobile).
+  - The `tools/capture/extension` (MV3) steps that one emulated tab through
+    the list. It starts at google.com, runs the panel and fresh queries, then
+    the Etsy categories and a few listings discovered from each. Pauses are
+    8–20 s, and at least 10 s on Etsy.
+  - It stops at the first `/sorry/`, CAPTCHA or block page.
+  - The list and the extension zip are published at
+    `https://chunky.meenan.dev/capture/` (`tools/capture/deploy.sh`, from
+    `tools/netlog/panel.txt` and `etsy.json`). The page also lists the
+    links in order for clicking by hand. DevTools emulation is per tab, so
+    new windows need emulation turned on again.
+  - An automated headless trial from the build host was challenged on its
+    first Google query and was dropped.
+- **Session metadata.** Record a `session.json` beside the manifest: capture
+  date, Chrome version, host OS, emulated device, locale, region and the
+  method (`manual` or `automated`). The default is Pixel 10 emulation, en-US,
+  US. The extractor derives the device class from `sec-ch-ua-mobile` and
+  `sec-ch-ua-model`. One netlog per session holds both sites.
+- **Query mix per session (about 40).**
+  - A fixed panel of 20 queries repeated in every session: navigational,
+    local, weather/time/sports oneboxes, shopping, news, entity panels and
+    technical long-tail. The 2026-10-21 queries seed it.
+  - About 20 fresh queries chosen that day.
+  - A few panel queries also go to images (`udm=2`) and news.
+  - Route = `/search` + vertical + device class. The web/mobile route is the
+    primary target.
+- **Cadence and size.** One session every 2–3 days for about three weeks
+  (8–10 sessions, 300–400 web/mobile responses), then weekly for drift. If
+  sessions must be manual, 5 sessions of about 30 queries is the floor; Etsy
+  then carries more of the volume.
+  Per-route results below about 300 responses are labeled indicative. Other
+  routes aim for at least 50.
+- **Slices: sessions are the unit, assigned chronologically and frozen before
+  any evaluation.**
+  - Training: the earliest 60% of sessions.
+  - Tuning: the next 20%.
+  - Evaluation: the latest 20%, captured after the cut rules and models are
+    frozen.
+  - Template change: any session where Google's dictionary hash changes or a
+    template diff shows a structural change. Dictionary rotation is the cheap
+    marker.
+  - Panel queries yield same-query responses across sessions. Report them
+    separately from new-query responses (D-015's naturally repeated bodies).
+    Byte-identical bodies are reported as duplicates.
+- **Excluded spans** (literal-only; chunks overlapping them are not admitted,
+  D-017):
+  1. Named per-response carriers found on 2026-10-21: CSP `nonce`, `kEI`/`ei`,
+     `ved`/`data-ved`, generated `id="_…"` values and signed `/goto?url=`
+     parameters.
+  2. Every cookie or `Set-Cookie` value from the session's netlog, matched
+     exactly in bodies. The `DV` cookie value is echoed into every page
+     (`"dv":"…"`).
+  3. Values that repeat within a session but differ across sessions, found by
+     cross-session diff. For example, `sca_esv` was identical in all 23
+     responses. Repetition within a session is never evidence of publicity
+     (D-013).
+
+  Values unique to one response (signed parameters, thumbnail ids) cannot
+  become cache entries. They need no special rule beyond (1).
+- **Manifest format v1.**
+  - One directory per session: `manifest.jsonl`, `session.json`,
+    `bodies/<sha256>.html`, `served/<id>.<encoding>` and
+    `dicts/<sha256>.{dict,json}`.
+  - Each manifest row records: capture time, URL, query, route, protocol,
+    status, redacted request and response headers, served encoding,
+    dictionary hash, served and decoded lengths, body hash, transport reads
+    `[ms, bytes]`, and C-validated flushes
+    `{decoded_offset, stream_offset, arrival_ms}`.
+  - Rows also carry flags, and from M1 the excluded-span offsets.
+  - Each row carries `manifest_version`.
+- **Second and third sources: Common Crawl, Wikimedia and Shopify (owner's
+  choice).**
+  - Coverage in CC-MAIN-2026-39 (html, status 200), from the columnar index:
+
+    | Source | Pages | Median WARC record |
+    | --- | --- | --- |
+    | `en.wikipedia.org/wiki/` | 52,832 | 37 KB |
+    | Wikimedia Commons | 77,426 | 18 KB |
+    | English Wiktionary | 43,956 | 15 KB |
+    | `*.myshopify.com` storefronts | 30,057 | 46 KB |
+
+    Monthly snapshots supply the chronological slices and natural template
+    changes. There are no flush schedules or served encodings, so use synthetic
+    schedules.
+  - Wikimedia content is CC BY-SA, which is unambiguous under D-013.
+  - **Shopify: each store is its own tenant** (owner, 2026-10-21; D-013's
+    tenant/site partition).
+    - Store templates differ widely, so there is no cross-store learning,
+      template structure included.
+    - Corpus slices and per-route results are per store. Sample a few stores
+      with enough crawled pages each (30 or more), not random pages across
+      stores.
+    - Cross-store reuse is reported only as a contrast.
+    - Storefronts on custom domains are not visible by URL.
+  - Absent from Common Crawl (most likely blocking CCBot): Stack Overflow, IMDb,
+    Amazon, eBay, BBC, Tripadvisor, Reddit, Medium, Yelp, npm, NYTimes, Etsy.
+    GitHub (126k), YouTube watch pages (76k; about 284 KB records),
+    PyPI (54k), Target product pages (13k) and Best Buy (8k) are present as
+    alternates.
+  - Access: use `cluster.idx` and CDX block range reads, or cached row groups,
+    with sequential, paced WARC fetches (RE-008).
+- **Etsy** stays in every extension-driven session (owner, 2026-10-21): 8
+  categories × 5 listings, at least 10 s apart. It is dropped only if it blocks
+  or challenges the owner's real browser too. Common Crawl has almost none of
+  it: 14 etsy.com captures in CC-MAIN-2026-39 and 1 in -43, none of them
+  listings. Scripted clients get a 403, and headless Chrome from the build host
+  was blocked, so live capture is its only source.
+- The owner's `news-tldr.com` is a static-site build captured by accident. It
+  is not a candidate, and the extractor already skips it.
+
+**Context.** On 2026-10-21 the first session was 23 pages with 23 distinct
+queries, captured manually in an incognito window emulating a Pixel 10. So it
+has no repeated route bodies and no split. Named carriers come
+to about 1.7% of decoded bytes. Single-response 16+ character tokens cover
+18.6% outside `data:` URIs (8.1%). Most of them are content or signed
+parameters rather than secrets.
+
+**Consequences.** M1's extractor adds `session.json`, cookie-value span
+marking and the carrier list. Cross-session diffing needs at least two
+sessions before any training artifact is derived.
+
+**Reopen if.** The panel turns out to dominate the cache through repetition,
+or the corpus is too small to separate the slices.
+
+## D-021: Worker shell is thin JS around raw wasm exports; encoded responses send `no-transform` and negotiate from `clientAcceptEncoding`  (2026-10-21, status: accepted)
+
+**Decision (M0 Worker spike recommendation, accepted by the owner).**
+
+- The Worker is a JS module that owns `fetch`, streams, backpressure and
+  cancellation.
+- It calls a Rust cdylib through raw exports (no wasm-bindgen): one input
+  buffer and one output buffer in wasm memory, with one copy in and one copy
+  out per origin read.
+- Every response the Worker encodes sends `Cache-Control: no-transform`,
+  merged with the origin's directives.
+- Negotiation reads `request.cf.clientAcceptEncoding`, never the request's
+  `Accept-Encoding`.
+- dcb responses are cached at the edge only behind an outer entrypoint that
+  normalizes the encoding headers into the cache key. Otherwise they are not
+  edge-cacheable.
+
+**Context.** The spike ran on `chunky.meenan.dev`, 2026-10-21:
+
+- **Delivery:** per-read flushed br (rust-brotli q5 in wasm) arrived over
+  HTTP/2 (curl) and HTTP/3 (headless Chrome) within about 20 ms of the origin's
+  500 ms pacing. Without flushes, everything arrived at the end.
+- **Transcoding:** without `no-transform`, Cloudflare transcoded our br to zstd
+  for zstd-capable clients (RE-005).
+- **Cache:** Workers Cache returned manual br byte-exact, but could serve dcb
+  to a non-dcb client (RE-006).
+- **Cost in V8** (Node 24, same wasm, 23 corpus pages on Google's flush
+  schedule, shared host so indicative only): copies were 6.7% of encode time at
+  q2 (120 MB/s) and 2.5% at q5 (57 MB/s). Instantiating per request cost
+  about 0.25 ms.
+
+workers-rs would add bindgen glue, and the stream chunks would still cross the
+JS boundary, so it offers no copy savings to buy.
+
+**Consequences.**
+
+- D-003's open shell question closes.
+- The response contract gains `no-transform` alongside D-017's `Content-Length`
+  stripping and `ETag` weakening.
+- Peak wasm memory per encoder was 13.8 MiB (q2) and 19.9 MiB (q5) at lgwin
+  22, and 8.4 MiB at q5 lgwin 18. That sets Q4's per-stream reservation and
+  the stream count per 128 MB isolate.
+
+**Reopen if.** Cloudflare honors `encodeBody: "manual"` without
+`no-transform`, or a measured CPU budget shows JS/wasm transfers above a few
+percent at the chosen tier.
+
+## D-020: Fork rust-brotli as a vendored crate with an external-command entry point; build it with `portable-float`  (2026-10-21, status: accepted)
+
+**Decision (Q2 spike recommendation, accepted by the owner).**
+
+- Vendor dropbox/rust-brotli 9.0.0 (commit `6518a4e`, BSD-3-Clause AND MIT,
+  upstream notices kept) as a workspace crate. Our changes go on top as
+  separate, upstreamable commits.
+- The fork adds one public entry point,
+  `encode_external_metablock(input, commands, is_last, flush)`. It writes one
+  meta-block from a caller-supplied command list (insert length, covered copy
+  length, copy-length code, actual distance). It resolves distance short codes
+  against the live distance cache, then hands off to the existing
+  `WriteMetaBlockInternal`. The encoder's own backward-reference search is
+  skipped. Table mode follows `params.quality`. q2 is the fast single-table
+  path (`store_meta_block_fast`). q4 and up run full block splitting and
+  clustering; q11 is the oracle mode. Capture uses the existing meta-block
+  callback (`log_meta_block`), which already reports per-block commands with
+  actual distances and static-dictionary word ids and transforms.
+- Every build the project measures or ships, native and wasm32, enables the
+  fork's `portable-float` feature. It replaces the libm `log2`/`powf` calls
+  in the cost estimators with tables.
+
+**Context.** The M0 Q2 spike patched a scratch clone with about 150 lines. A
+harness captured q11 parses of 8 inputs (rust-brotli test data plus synthetic
+templated HTML) and reinjected each one in three ways: oracle tables, fast
+tables, and per-flush 4 KiB blocks. The system C decoder (libbrotlidec 1.1.0)
+decoded all 64 outputs to the exact input. Oracle reinjection matched q11
+byte for byte on 4 of 8 inputs and came within 7 bytes on the rest. Dumping
+the internal command arrays showed identical commands except for 2–4 distance
+short codes per file. q11 picked the cache-slot code by cost; the injector's
+greedy `ComputeDistanceCode` picked a ±delta code. The meta-block callback
+records only the final distance, so exact replay needs the captured parse to
+carry its short code. Native vs wasm32 (Node V8) output at q2/q5/q9/q11
+differed on 2 of 32 pairs with default features (q11 only, 1 and 12 bytes).
+It differed on 0 of 32 with `portable-float` (RE-003).
+
+Indicative sizes (synthetic 20-page HTML, 90,672 B, lgwin 22) are below.
+They come from a synthetic fixture, not the corpus, so they make no corpus
+claim.
+
+| Configuration | Size |
+| --- | --- |
+| q11 buffered | 13,221 B |
+| q2 buffered | 19,330 B |
+| q11 parse with q2 fast tables | 13,436 B |
+| q11 streamed, 4 KiB flushes | 14,414 B |
+| q2 streamed, 4 KiB flushes | 21,265 B |
+| q11 parse, oracle tables, 4 KiB blocks | 14,349 B |
+| q11 parse, fast tables, 4 KiB blocks | 15,082 B |
+
+**Consequences.**
+
+- Command injection needs no deep fork, which answers features.md Q2.
+- M2 extends the entry point with:
+  - an optional explicit short code per command, for exact q11 replay;
+  - emit-time byte verification (D-017);
+  - external mode that does not allocate the quality's hasher (`ensure_initialized`
+    allocates it today; at q10/q11 it is the large binary-tree hasher);
+  - a retained-history cap below the ring buffer's `2^(lgwin+1)`.
+- rust-brotli is edition 2015 with MSRV 1.59. That does not constrain the
+  workspace edition.
+- Native/wasm byte-identity tests (M2) run with `portable-float` on. Its sizes
+  differ slightly from default rust-brotli and from C. The reference curve
+  reports the build actually used.
+
+**Reopen if.** Upstream accepts an equivalent entry point (switch to a git or
+crates.io dependency), or `portable-float` costs measurable size or CPU
+against the C baseline.
+
+## D-019: Prototype learning may use private/Set-Cookie responses from approved sources  (2026-10-21, status: accepted)
+
+**Decision (owner).**
+
+- For the engineering prototype, a response from an approved source is
+  eligible for the parse cache, route model and cut rules even when it has
+  `Cache-Control: private`, `Set-Cookie` or a credentialed request.
+- Excluded spans (cookie values, nonces, tokens, per-response ids) stay
+  literal-only and unindexed.
+- Live private-traffic learning remains out of scope (D-013); this changes
+  only offline eligibility.
+- Dictionaries are unaffected. chunky adds none beyond what CDT already
+  serves, and CDT's own no-private-data rules govern the M9 generated
+  dictionary.
+
+**Context.** chunky is an optimization layer on compression performance.
+Learned artifacts are hints that shape how a response is parsed and
+entropy-coded. Every emitted reference still points into that response's own
+retained history or a negotiated dictionary, and is byte-verified (D-017). No
+artifact is sent to clients. Classic BREACH (attacker-controlled bytes next to
+a secret in the same response) is a property of compressing that response at
+all, and these artifacts do not change it.
+
+**Consequences.** This relaxes D-013's header-based ineligibility for
+offline prototype artifacts. D-018's span-exclusion work is still required.
+
+**Reopen if.** The prototype moves beyond the engineering stage, for example
+to sharing artifacts trained on one party's traffic with another party's
+responses.
+
+## D-018: Initial corpus: manually captured logged-out Google Search netlogs, extracted offline  (2026-10-21, status: accepted; capture method and sources extended by D-022)
+
+**Decision (owner accepted 2026-10-21; amends D-007 and D-013 for this one
+source).**
 
 - The first corpus is logged-out Google Search result pages plus Google's
   published compression dictionary. The owner captures them by hand: run a
@@ -284,7 +718,7 @@ Live request bodies, fingerprints and histograms do not enter training (D-013).
 **Reopen if.** A different determinism contract or bounded continuation is
 needed. Resource-failure aborts must remain distinguishable from valid EOF.
 
-## D-013: Approved public sources and eligible spans govern all learning  (2026-10-21, status: accepted; D-018 proposes a source-specific amendment)
+## D-013: Approved public sources and eligible spans govern all learning  (2026-10-21, status: accepted; amended for one source by D-018; header-based ineligibility relaxed for offline prototype artifacts by D-019)
 
 **Decision.** Supersede D-009's N-session privacy claim. Initial learning is
 offline and uses only operator-approved public corpus sources with explicit
@@ -382,7 +816,7 @@ path as a first-class configuration.
 valuable enough inline that its exclusion costs more than the predictability
 gains.
 
-## D-007: Measurement corpus comes from logged-out public crawls, stored outside the repo  (2026-10-21, status: accepted; D-018 proposes manual netlog capture of Google Search)
+## D-007: Measurement corpus comes from logged-out public crawls, stored outside the repo  (2026-10-21, status: accepted; amended by D-018: manual netlog capture of Google Search)
 
 **Decision.** The measurement corpus is built by crawling public templated
 sites while logged out (no cookies, no credentials). Responses are stored in a
@@ -472,7 +906,7 @@ spike).
 a way that defeats the streaming layout, or Worker CPU/memory limits make the
 design unworkable there.
 
-## D-003: Rust workspace; encoder forked from Dropbox rust-brotli  (2026-10-21, status: accepted; C baseline role amended by D-016)
+## D-003: Rust workspace; encoder forked from Dropbox rust-brotli  (2026-10-21, status: accepted; C baseline role amended by D-016; fork mechanics in D-020; Worker shell in D-021)
 
 **Decision.** The core encoder library, the CLI tools and the Worker's wasm
 module are Rust, in one Cargo workspace. The Worker uses the same core

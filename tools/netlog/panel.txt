@@ -1,0 +1,26 @@
+# D-022 query panel: repeated in every capture session (seeded from the
+# 2026-10-21 manual session; the owner edits this list). Add about 20 fresh
+# queries per session in a separate, session-local file.
+flowers
+toro zmaster 4000
+mcdonalds near me
+huggingface
+dgx spark
+fable 5.5
+gemini spark
+mercedes cle 53
+best mouse trap
+class c toy hauler
+claude code vs codex
+compression dictionary transport
+dcb file format
+optimizing brotli compression
+weather
+time
+football score
+john oliver
+youtube
+snl
+news
+spacex rocket
+plumber

@@ -1,8 +1,10 @@
 # Architecture
 
-> **Status: contract draft.** Toolchain, fork mechanics, Worker shell, blob
-> delivery and numeric resource caps remain M0 choices. This document specifies
-> the required interfaces and behavior; it does not claim they are implemented.
+> **Status: contract draft.** Fork mechanics are set by D-020, the Worker
+> shell by D-021, toolchain and layout by D-023, and blob delivery and initial
+> resource caps by D-024 (to be validated in M6).
+> This document specifies the required interfaces and behavior; it does not
+> claim they are implemented.
 > The encoder mechanisms are in [design.md](design.md).
 
 ## Fixed points
@@ -28,7 +30,7 @@
 
 ## Workspace
 
-Names and fork packaging remain M0 choices.
+Fork packaging is D-020; names and layout are D-023.
 
 | Crate / dir | Role | Targets |
 | --- | --- | --- |
@@ -63,7 +65,9 @@ EOF success from length mismatch and handle pending command fields explicitly.
 The Worker derives logical flushes from origin reads through a flush policy:
 flush every nonempty read, coalesce reads that are already available, or wait
 for a minimum byte count unless the source is idle. M5 measures each policy's
-header overhead against delivery latency; the initial policy flushes every read.
+header overhead against delivery latency. The initial policy coalesces reads
+that are already available (RE-007). Per-read flushing cost 9–12% on
+decompressed origin reads with no latency benefit in the M0 spike.
 Replaying the same body with a different read schedule or policy can change
 compression. Core fragmentation tests hold logical flush positions fixed.
 End-to-end delivery tests measure paced markers, not preservation of origin
@@ -135,21 +139,24 @@ with explicit admission, commitment and cancellation behavior:
 
 1. Start bounded lazy wasm/model init alongside origin fetch; resolve artifact
    compatibility, mode and memory admission before committing the outgoing response.
-2. Negotiate the client's original encodings (including q-values; the Worker may
-   receive normalized Accept-Encoding). Check `request.cf.clientAcceptEncoding`
-   behavior in the spike. Respect no-transform, HEAD/bodyless statuses, ranges
-   and unsupported encodings. Strip internal hint headers on every outgoing path.
-3. Treat upstream Content-Length as exact uncompressed length only for a trusted
-   unencoded representation. An encoded length is never MLEN and does not prove
-   that the origin buffered the body. Verify transparent decompression and header
-   behavior with the selected runtime; maintain an explicit representation state.
-   The Q3 spike tests requesting `Accept-Encoding: identity` from the origin.
-   That avoids origin compression and edge decompression, and yields a trusted
-   length when the origin honors it.
-4. Once admitted, set Content-Encoding, merge Vary, remove encoded-length and
-   other invalidated representation metadata, and weaken strong ETags as needed.
-   For `br`, return a streaming Response with `encodeBody: "manual"`. M8 adds
-   dcb framing/identity and its Vary/negotiation rules separately.
+2. Negotiate from `request.cf.clientAcceptEncoding`, including q-values. The
+   request's `Accept-Encoding` header is always normalized to `gzip, br`.
+   `clientAcceptEncoding` keeps `dcb`/`dcz` but drops `zstd` (RE-005, D-021).
+   Respect no-transform, HEAD/bodyless statuses, ranges and unsupported
+   encodings. Strip internal hint headers on every outgoing path.
+3. Treat upstream Content-Length as exact uncompressed length only for a
+   trusted unencoded representation. An encoded length is never MLEN and does
+   not prove that the origin buffered the body. Behind Cloudflare, an
+   `Accept-Encoding: identity` origin request is not honored: the origin
+   still receives gzip, and the Worker sees decoded bytes with neither
+   `Content-Encoding` nor `Content-Length` (RE-007). Plan on no trusted length.
+4. Once admitted, set Content-Encoding, merge Vary, add `no-transform` to
+   Cache-Control (otherwise the edge transcodes br to zstd, RE-005), remove
+   encoded-length and other invalidated representation metadata, and weaken
+   strong ETags as needed. For `br`, return a streaming Response with
+   `encodeBody: "manual"`. M8 adds dcb framing/identity and its
+   Vary/negotiation rules. Edge-cached dcb needs an outer entrypoint that
+   normalizes the encoding headers into the cache key (RE-006).
 5. Pump bounded blocks with policy-driven flushes for streaming responses and a
    deterministic byte cap for completion buffering. Await output capacity;
    cancel origin reads and dispose the encoder if the client cancels.
@@ -180,11 +187,16 @@ boundaries; the parked open-block path needs its own demonstrated continuation.
 
 ## Remaining M0 architecture choices
 
-- Fork packaging and injection surface (Q2), shell/JS-wasm buffer interface (Q7).
-- Model distribution via bundled blob, Static Assets, R2 or KV (Q4), with bounded
-  loading/refresh and response version pinning.
-- Numeric shared/per-stream/pool limits and runtime headroom from the spike;
-  explicit callback/error surface for commitment, backpressure and cancellation.
-- Destination for aggregate operational telemetry, excluding training records.
+- Shell/JS-wasm buffer interface (Q7): thin JS shell with raw wasm exports
+  is set by D-021, with `no-transform` and `clientAcceptEncoding`
+  negotiation. Fork packaging and the injection
+  surface are set by D-020: a vendored rust-brotli crate with an
+  external-command meta-block entry point, built with `portable-float`.
+- Set by D-024 (Q4): artifacts bundled in the Worker script and pinned
+  by deployment version; a 96 MiB application cap with fixed per-isolate
+  stream slots (16 MiB full, 6 MiB small); edge-compression fallback before
+  commitment when no slot is free; `slot_*` wasm exports as the commitment
+  interface; Workers Analytics Engine for aggregate telemetry. M6 validates
+  the numbers.
 - Public source/span policy, chronological split and route namespace below the
   required tenant/site partition. Live session identity is unnecessary (D-013).

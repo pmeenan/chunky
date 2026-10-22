@@ -28,8 +28,8 @@ affected docs. Until then, these govern.
   decisions table are the accepted starting architecture. Deviations get a new
   D-entry. (D-001)
 - **Rust for the core, CLIs and wasm.** One Cargo workspace. The encoder is a
-  fork of Dropbox's rust-brotli. The Worker shell (thin JS or workers-rs) is
-  still open. (D-003)
+  fork of Dropbox's rust-brotli. The Worker shell is thin JS around raw
+  wasm exports (D-021). (D-003)
 - **The server deployment is a Cloudflare Worker compressing proxy.** wasm
   core, origin behind it, pre-encoded bodies sent with `encodeBody: "manual"`.
   Budget for the Worker limits: 128 MB per isolate including wasm memory, and
@@ -56,6 +56,8 @@ affected docs. Until then, these govern.
 | ------- | ---------------- |
 | `docs/` | Design, vision, plan, architecture, decisions, features, rough edges, workflow |
 | `data/` | Local corpus (captured netlogs, crawls) and derived data. Git-ignored, never committed (D-007) |
+| `tools/netlog/` | Netlog extractor (`extract.py`), query panel and Etsy list, served-stream flush scanner (`flushscan`, standalone crate until M1) |
+| `tools/capture/` | Capture-session extension, link page and `deploy.sh` to `chunky.meenan.dev/capture/` (D-022) |
 
 The Cargo workspace (core, CLIs, Worker) lands in M1. Update this table when it
 does.
@@ -113,8 +115,11 @@ build → commit loop, on-demand reviews, and the human commit gate.
 ## Current status
 
 Milestone **M0 (plan the plan)**: the feature set, architecture, and milestone
-ladder include the design-review corrections. The initial corpus is proposed
-(manual Google Search netlogs, D-018); toolchain choices and the
-extraction/Worker/fork spikes remain open. See [docs/plan.md](docs/plan.md). No code
-exists yet; workspace scaffolding is M1. Keep this paragraph short and current
-when plan.md milestone status changes (rule 4).
+ladder include the design-review corrections. The initial corpus is accepted
+(manual Google Search netlogs, D-018). The rust-brotli injection spike is done
+(fork mechanics: D-020), as are the netlog extraction spike and the
+opportunity probe (go), and the Worker spike (shell: D-021).
+Toolchain, architecture caps and corpus policy are set (D-022–D-024). M0 exits
+when the owner says the plan is ready to build. See [docs/plan.md](docs/plan.md). No
+code exists yet beyond `tools/netlog/`; workspace scaffolding is M1. Keep this paragraph short and
+current when plan.md milestone status changes (rule 4).

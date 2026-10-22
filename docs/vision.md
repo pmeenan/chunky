@@ -47,7 +47,7 @@ quality's effective match reach reported: q0/q1 never match across input calls
 or flushes (RE-002), so a shared lgwin does not make them comparable (D-016).
 The initial corpus is manually captured logged-out Google Search netlogs,
 measured offline, with Google's served encoding and dictionary as an additional
-real-world baseline (D-018, proposed).
+real-world baseline (D-018).
 Train only on approved public data, freeze the model,
 cache and cut rules, and evaluate later held-out captures (including a template
 change). Exact-response replay is labeled separately as a diagnostic.

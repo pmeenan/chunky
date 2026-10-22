@@ -10,8 +10,9 @@ Goal: settle the feature matrix, architecture and build sequence with the owner.
 D-012–D-015 incorporate the design review: exact bytes, approved public learning,
 explicit runtime contracts and held-out measurement. D-016–D-017 add the
 quality-curve baseline, q2-class cold path, emit-time verification and the
-retained-history cap. D-018 proposes the initial Google Search corpus. No encoder
-code exists yet.
+retained-history cap. D-018 (accepted) sets the initial Google Search corpus.
+The Q2 spike answered command injection and fork mechanics (D-020). D-019
+relaxes private/Set-Cookie ineligibility for offline prototype artifacts. No encoder code exists in the repo yet.
 
 - [x] Repo scaffolding for the AI-directed workflow.
 - [x] Revise the design and milestone scopes to address the review findings.
@@ -19,46 +20,149 @@ code exists yet.
       before a command's copy distance arrives (RE-001); no browser claim implied.
 - [x] Probe reference encoder match reach across input calls and flushes:
       q0/q1 never match across calls (RE-002, D-016).
-- [ ] Owner accepts or revises D-018, the D-013 eligibility exception for
-      manually captured Google Search netlogs.
-- [ ] Feature triage: resolve the remaining proposed rows in features.md with
-      the owner. Parked single-block research does not block the initial encoder.
-- [ ] Spike (Q2): inspect rust-brotli command generation/meta-block separation;
-      capture and reinject a q11 parse; choose fork mechanics. Also check whether
-      output-affecting paths use floating-point math functions (`log2`, `exp`)
-      whose native libm and wasm implementations could differ. If so, plan
-      deterministic replacements before relying on native/wasm byte identity.
-- [ ] Spike (Q3 + Q7): manually encoded per-flush `br` from a tiny Worker,
+- [x] Owner accepts or revises D-018, the D-013 eligibility exception for
+      manually captured Google Search netlogs. Accepted 2026-10-21. The owner
+      also relaxed the private/Set-Cookie rule for prototype artifacts (D-019).
+- [x] Feature triage: the four optional Worker diagnostics/controls are
+      confirmed. Cache API storage stays proposed until the Q3 spike tests
+      Workers Cache (see that row). Parked single-block research does not block
+      the initial encoder.
+- [x] Spike (Q2): command injection needs no deep fork. A ~150-line entry
+      point feeds external commands to the existing meta-block writer, and
+      captured q11 parses round-trip through the C decoder in oracle, fast and
+      per-flush modes. Default builds differ native vs wasm at q11 (libm
+      `log2`/`powf`); `portable-float` makes them identical (RE-003). Fork
+      mechanics: D-020. The spike code lived in a session scratchpad;
+      M2 rebuilds it in the workspace.
+- [x] Spike (Q3 + Q7): done 2026-10-21 (D-021, RE-005–RE-007).
+      - **Delivery:** per-read flushed br arrives promptly over HTTP/2 and
+        HTTP/3 once `no-transform` is sent.
+      - **Negotiation:** must use `clientAcceptEncoding`, which keeps
+        dcb/dcz.
+      - **Cache:** Workers Cache is byte-exact for br but needs a normalizing
+        outer entrypoint for dcb.
+      - **Cost:** JS/wasm copies are 2.5–6.7% of encode time; peak wasm memory
+        is 14–20 MiB per encoder at lgwin 22.
+      - **Fragmentation:** origin reads fragment unlike origin writes (one
+        2,032 B write arrived as reads of 27 B and 2,005 B).
+      - **Real origin** (owner's nginx behind the route):
+        `Accept-Encoding: identity` is not honored, because the origin always
+        receives gzip. The Worker sees decoded bytes with no `Content-Encoding`
+        or `Content-Length`, in about 305 reads per 534 KB page (median 70 B,
+        max 4 KiB).
+      - **Flush policy:** flushing every read costs +12.5% (q2) and +8.8%
+        (q5). Coalescing already-available reads matched the unflushed size
+        and kept paced-marker latency.
+      - **Budgets:** carried into the architecture item below (wasm memory
+        per encoder, CPU per MB).
+
+      Original scope: manually encoded per-flush `br` from a tiny Worker,
       paced origin markers and client arrival captures over HTTP/2 and HTTP/3.
       Measure delivery, origin-read fragmentation and JS/wasm copy overhead;
       recommend JS shell or workers-rs. Do not require transport chunk boundaries
       to survive. Record the origin-read size distribution, since it sets
       per-flush header overhead. Test whether an `Accept-Encoding: identity`
       origin request is honored, yielding a trusted Content-Length and skipping
-      origin compression plus edge decompression. Use the result to name initial
-      resource budgets and headroom.
-- [ ] Spike (Q8, extraction): from an owner-captured netlog of a logged-out
-      search session (D-018), write the extraction script. Confirm which events
-      carry encoded and decoded bytes with timestamps, strip cookie values,
-      extract Google's dictionary with its hash and match rules, decode
-      dcb/dcz bodies with it, recover flush offsets from the served stream, and
-      flag consent/CAPTCHA pages.
-- [ ] Quick opportunity probe on the first captured pages, with throwaway
-      scripts in the scratchpad: the reference q1–q11 curve buffered and with the
-      recovered flush schedule; q11 with Google's dictionary; the gap
-      decomposition (context modeling on/off, q9 vs q11, lgwin); naive 256 B
-      CDC overlap. Summarize the numbers here. This is a go/no-go sanity check
-      before M1 tooling, not an evaluation.
-- [ ] Corpus policy (Q8): finalize the D-018 query mix, locale, session
+      origin compression plus edge decompression. Check whether
+      `request.cf.clientAcceptEncoding` preserves `dcb`/`dcz`. Test whether
+      Workers Cache stores `encodeBody: "manual"` br bodies byte-exact and
+      serves the right variant per restored `Accept-Encoding` (the Cache API
+      row in features.md). Use the result to name initial resource budgets and
+      headroom. Docs checked 2026-10-21 report 128 MB per isolate (JS + wasm),
+      Paid CPU up to 5 min per request (`limits.cpu_ms`), and 25 MiB per Static
+      Asset or KV value (R2 for larger blobs). Recheck before relying on them.
+- [x] Spike (Q8, extraction): [tools/netlog/](../tools/netlog/) holds
+      `extract.py` and the `flushscan` byte-at-a-time boundary scanner. It
+      covers the first capture: 2026-10-21, Chrome 156 on Windows desktop, HTTP/3.
+      - **Bytes:** `URL_REQUEST_JOB_BYTES_READ` carries the served bytes,
+        including the 36 B dcb header; `..._FILTERED_BYTES_READ` carries the
+        decoded bytes. Both have timestamps.
+      - **Dictionary:** `/shared_dict/srp/<sha256>.dict` with
+        `match="/search*"`, 261,354 B. Its SHA-256 equals the
+        `Available-Dictionary` value.
+      - **Bodies:** all 23 `/search` documents (1 br, before the dictionary
+        loaded, and 22 dcb) decode with C libbrotlidec to exactly the netlog's
+        decoded bytes. One non-Google document was skipped.
+      - **Flushes:** 440 byte-aligned meta-block ends recovered, every one
+        validated by C (prefix + `0x03` decodes to the prefix). At all 602
+        transport read boundaries, every decodable one was found; the other 267
+        were mid-block.
+      - **Redaction:** `cookie`, `set-cookie`, `x-client-data` and auth header
+        values are redacted.
+      - **Consent/CAPTCHA:** none flagged; the heuristic is untested on a
+        positive case.
+      - **Flush pattern:** Google flushes the 15 B doctype at about 40 ms, then
+        roughly 10 KB median blocks. A final block can exceed 1 MB.
+      - **Not done:** excluded-span detection (nonces, per-response ids) is
+        left to corpus policy and M1.
+- [x] Quick opportunity probe: **go.** Size only; system C brotli 1.1.0,
+      lgwin 22; 23 responses, 24.2 MB decoded; throwaway scripts. One capture
+      session with no held-out split, so these are indicative numbers, not an
+      evaluation.
+
+      | Config (total bytes; ratio vs buffered q11) | Buffered | Google's flush schedule |
+      | --- | --- | --- |
+      | q1 | 6,158,285 (1.335) | 6,514,692 (1.412) |
+      | q2 | 5,559,915 (1.205) | 5,565,260 (1.206) |
+      | q5 | 5,013,758 (1.087) | 5,041,818 (1.093) |
+      | q9 | 4,886,121 (1.059) | 4,886,818 (1.059) |
+      | q11 | 4,613,409 (1.000) | 4,657,386 (1.010) |
+      | q11, no literal context modeling | 4,643,011 (1.006) | 4,676,832 (1.014) |
+      | q11, lgwin 18 | 4,971,157 (1.078) | — |
+      | q5 with Google's dictionary | 3,808,663 (0.826) | 3,832,143 (0.831) |
+      | q11 with Google's dictionary | 3,558,668 (0.771) | 3,584,717 (0.777) |
+
+      - **Cold-path gap:** the target cold path (q2, streamed on Google's
+        schedule) is 20.6% bigger than q11 streamed the same way. Google's
+        flushes cost q2+ almost nothing; q1 pays 5.5% (RE-002).
+      - **Where the gap is:** q9→q11 parsing is 5.9%. Literal context modeling
+        is only 0.6%. Capping history at 256 KB (lgwin 18) costs 7.8%, so the
+        retained-history cap matters on these 0.36–2.3 MB pages.
+      - **Dictionary:** Google's dictionary saves 23% at q11. At q2 it saves
+        nothing, because C 1.1.0 only uses an attached dictionary from q5 up
+        (RE-004). chunky's own paths are not bound to that cutoff.
+      - **What Google served:** 3,653,239 B on the 22 dcb pages. That lies
+        between our dictionary q5 and q9 on the same flush schedule, and is
+        6.0% above dictionary q11. The one br page was 197,044 B against our
+        q11's 184,323 B.
+      - **Chunk reuse:** naive Gear CDC, chronological, 22 later pages with all
+        queries different. At 256 B average chunks, 21.9% of bytes are in a
+        chunk seen in an earlier response (64 B: 33.0%, 1 KB: 13.7%); 5.0% are
+        in a dictionary chunk. This is reusable-parse potential, not a size
+        ceiling (D-015).
+- [x] Corpus policy (Q8): D-022 (accepted). Sessions are manual and
+      extension-assisted (`tools/capture/`, published at
+      `chunky.meenan.dev/capture/`): one Pixel 10-emulated incognito tab steps
+      through the Google panel, fresh queries, then Etsy categories and
+      listings. Second sources: Wikimedia and Shopify storefronts from Common
+      Crawl (owner's choice). Sample measurements wait until Common Crawl's CDN
+      stops throttling this host (RE-008). Etsy stays in each capture session
+      unless it blocks the owner's browser too. Span survey of the first
+      session: named per-response carriers are about 1.7% of decoded bytes;
+      the `DV` cookie value is echoed in every page; `sca_esv` repeats within
+      the session. `manifest.jsonl` from the extraction spike is the draft
+      manifest format. Finalize the D-018 query mix, locale, session
       cadence, excluded-span rules, responses per route and manifest format. Name
       chronological training/tuning/evaluation slices and a template-change
       slice. Name the second site (or a Common Crawl fallback) needed before
       generalization claims.
-- [ ] Architecture completion (Q4): choose blob delivery/storage, aggregate-only
+- [x] Architecture completion (Q4): D-024 (accepted): bundled
+      artifacts (64 MiB bundle limit), a 96 MiB application cap with fixed
+      stream slots, the edge-compression fallback when no slot is free, slot
+      exports as the commitment interface, and Analytics Engine telemetry.
+      Spike inputs: 14–20 MiB wasm memory per
+      lgwin-22 encoder (8.4 MiB at lgwin 18); about 9 ms (q2) and 19 ms (q5)
+      of V8 encode per MB, on the Workers Paid plan; 25 MiB per Static Asset or
+      KV value. Choose blob
+      delivery/storage, aggregate-only
       telemetry destination, numeric retained-history/model/stream/pool caps and
       the commitment interface. architecture.md records the required contracts,
       not measured limits.
-- [ ] Toolchain: edition/MSRV, workspace/fork layout, wasm build path, test stack,
+- [x] Toolchain: D-023 (accepted): Rust 1.99.1 pin, edition 2024,
+      vendored rust-brotli and C brotli v1.2.1 (clang native, wasi-sdk wasm32),
+      `scripts/check.sh` locally and in GitHub Actions, cargo-deny, and a
+      self-locking `chunky bench`. clang 18.1.3 and lld installed. Scope:
+      edition/MSRV, workspace/fork layout, wasm build path, test stack,
       fmt/clippy, local checks or CI, and permissive-license audit. Pin the C
       `google/brotli` baseline (commit, clang flags, native and wasm32 builds)
       and choose how the harness calls it: a small C driver or an FFI crate
