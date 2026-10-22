@@ -73,6 +73,19 @@ compression. Core fragmentation tests hold logical flush positions fixed.
 End-to-end delivery tests measure paced markers, not preservation of origin
 writes as read chunks.
 
+## Shared engine and per-stream state (D-025)
+
+One immutable `Engine` per Worker isolate or server process holds everything
+that is response-independent: static tables, model, warm cache, cut rules,
+dictionaries with offline-built match indexes, and precomputed tables. Natively
+it is `Send + Sync` behind `Arc`; in the Worker it lives in the single wasm
+instance (D-024). A `Stream<'engine>` owns only response-dependent state
+(retained history up to its cap, a cap-sized miss hasher, command, table and
+output scratch). It runs in a slot that is reset and reused, never freed and
+rebuilt. Artifacts load in place: validation plus slices over a bundled data
+module or a read-only `mmap`, never a parse into heap structures. Engine init
+happens once per isolate or process. Per-response setup is slot reset only.
+
 ## Isolate-wide memory budget
 
 Cloudflare's 128 MB limit includes runtime/wasm allocations; wasm linear memory

@@ -4,7 +4,7 @@ This is a living document. Record changes to load-bearing scope in decisions.md;
 routine implementation choices do not need entries. Check a box only when the
 item is done and verified. Status: `pending` · `in progress` · `done` · `parked`.
 
-## M0: Plan the plan  `in progress`
+## M0: Plan the plan  `done (2026-10-22)`
 
 Goal: settle the feature matrix, architecture and build sequence with the owner.
 D-012–D-015 incorporate the design review: exact bytes, approved public learning,
@@ -170,13 +170,13 @@ relaxes private/Set-Cookie ineligibility for offline prototype artifacts. No enc
       the netlog extractor starts as a script or a `chunky-cli` subcommand, and
       how CPU benchmarks run on a shared measurement host (workflow.md).
 
-**Exit:** the owner says the plan is ready to build; Q2–Q4 and toolchain/corpus
+**Exit (met 2026-10-22):** the owner says the plan is ready to build; Q2–Q4 and toolchain/corpus
 choices have answers or named fallbacks, and the opportunity probe has not
 returned a no-go. Q1's single-block browser research is parked; the initial
 fallback is the accepted per-flush design. M0 remains open until that owner
 call; this revision does not claim the spikes are complete.
 
-## Milestone ladder  `pending (scoped; M0 choices remain)`
+## Milestone ladder  `M1 next`
 
 All reported results name corpus/split/artifact versions and exact commands.
 Model/cache/cut rules are frozen before evaluation, with no evaluation-driven
@@ -195,7 +195,13 @@ logical flush offsets separately from transport fragments. Train/tune on earlier
 captures and evaluate later ones; label naturally repeated bodies and obtain or
 synthesize a template change.
 
-Measure the reference curve (at least q1–q6, q9 and q11) for size and CPU on
+Add a multi-origin sample (HTML, JS, CSS across many unrelated domains, from
+HTTP Archive's 2026-10-01 crawl as two slices, top 10k and a random
+cross-rank `TABLESAMPLE`, reported separately; plus Common Crawl) with a held-out-origin slice for
+the generic tier (D-026), following D-026's BigQuery cost discipline. Record the D-025 baselines: per-stream incremental memory and per-response
+setup time for C brotli (with one shared prepared dictionary) and for
+rust-brotli, by quality and window. Measure the reference curve (at least
+q1–q6, q9 and q11) for size and CPU on
 identical bytes and flush schedules with both pinned C `google/brotli` (the CPU
 baseline, D-016) and rust-brotli at the fork base, driven through the same
 call/flush sequence. Record C version, compiler and flags. Report each
@@ -242,7 +248,8 @@ same validity/flush checks.
 
 ### M3: Offline parse cache on held-out responses  `pending`
 
-Chunker, bounded eligible-public warm set, anchored references, stitcher,
+Chunker, bounded eligible-public warm set (including D-026's public-library
+tier shared across tenants), anchored references, stitcher,
 q1-class miss hasher with deterministic candidate/byte-comparison caps, and
 training-only frozen cut rules. Training parses run over real eligible
 responses; chunks overlapping excluded spans are not admitted, and references
@@ -258,15 +265,18 @@ no invalid bytes or learning-gate bypasses.
 
 ### M4: Route models and versioned artifact loading  `pending`
 
-Offline context maps, priors, pruned tables and small-block policy. Implement
-`chunky-formats` serialization and validated native/wasm loading for the model
+Offline context maps, priors, pruned tables and small-block policy, per
+route and per content type for the generic tier (D-026). Implement
+`chunky-formats` serialization and validated native/wasm in-place loading
+(D-025: offline-built in-memory layout, no parse-time rebuild) for the model
 and warm cache, including site/route, chunker and compatibility metadata and
 public-data provenance. Pin one artifact per stream. Bad/incompatible artifacts
 select the cold path before commitment. Complete single-block tables are deferred
 with the parked experiment.
 
 **Exit:** size/CPU ablations for cache alone, model alone and both on frozen
-held-out data; cold and stale-model regressions reported by route against the
+held-out data, plus generic tier alone, tenant tier alone and both on the
+held-out-origin slice (D-026); cold and stale-model regressions reported by route against the
 M1 targets. Matching native/wasm results for identical logical inputs/options;
 loader rejects invalid lengths/offsets/versions within a bounded memory budget.
 The Worker can use these artifacts without waiting for M7.
@@ -299,7 +309,9 @@ account for shared blobs, refresh/growth peaks, JS/wasm transfers and headroom.
 The q2-class fallback also needs a reservation. Apply backpressure and cancel
 origin reads on downstream cancellation; cleanup is mandatory, recording is shed.
 
-**Exit:** real-origin size/CPU/memory/latency against the M1 targets; fault
+**Exit:** real-origin size/CPU/memory/latency against the M1 targets, including
+engine resident size, per-stream incremental memory, one-time engine init and
+per-response setup time (D-025); fault
 injection and concurrent long-lived slow-consumer tests remain within budget,
 including model refresh. Exhausted capacity rejects compression before commitment
 with an acceptable alternate representation or an error. Cover `br;q=0`, HEAD,

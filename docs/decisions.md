@@ -30,6 +30,192 @@ Decision / Context / Consequences / Reopen if
 
 ---
 
+## D-026: Generic multi-origin tier: public-trained, cross-tenant artifacts beneath per-tenant ones, evaluated on held-out origins  (2026-10-22, status: accepted)
+
+**Decision (accepted by the owner).** A shared server compressing many
+unrelated origins, with no dictionaries and no learned templates, is a
+first-class target. Its gains are expected to be smaller.
+
+- **Generic tier.** The engine (D-025) holds artifacts keyed by content type
+  and sniffed sublanguage (HTML, inline script and style, JS, CSS, JSON), not
+  by site or route:
+  - Entropy and block policy: context maps, priors, pruned-table ladders and
+    small-block size policy. These matter most for small responses, where
+    table headers dominate.
+  - A common-code parse cache: q11 parses of content-defined chunks that recur
+    across unrelated origins (JS/CSS libraries, analytics and consent
+    snippets, framework boilerplate). Copies still point only into the
+    response's own history (D-017), so the cache saves parse CPU, not bytes.
+    - Many versions of each library are in the field, so whole files are
+      rarely byte-identical, but most of their bytes are. Caching is per
+      chunk, never per file. Bytes shared across versions hit, and only the
+      changed regions miss; prefix extension recovers part of those.
+    - M3 measures cross-version coverage: the share of version N+1 covered by
+      chunks from version N, using cdnjs's full version history.
+  - Miss-search heuristics tuned for markup and code, including use of
+    brotli's built-in static dictionary at q1–q2-class CPU.
+- **Training and sharing rule.** Generic artifacts are trained offline from
+  approved sources, under D-013 as relaxed by D-019, and shared across
+  tenants on the same basis as D-019: an artifact only reaches the parse a
+  higher quality level would have found, and the response still references
+  only its own bytes.
+  - Sources: Common Crawl across many domains; the HTTP Archive response-body
+    dataset (HTML, JS, CSS from millions of public pages; the owner co-created
+    and operates it); and permissively licensed library sources such as cdnjs.
+  - Never trained on live traffic (D-013). Excluded spans stay literal-only.
+- **BigQuery cost discipline** (HTTP Archive, `httparchive` project, the
+  owner's billing):
+  - Dry-run every query first (`bq query --dry_run`).
+  - Cap every real query with `--maximum_bytes_billed`, 50 GB by default;
+    raise it only with the owner's OK.
+  - Start from the sample datasets.
+  - Always filter on partition and cluster columns (date, client, page or
+    type). `LIMIT` does not reduce billed bytes.
+  - Write extracted rows once to local files under `data/`, and never re-scan
+    for the same question.
+- **Layering.** Per-tenant or per-site artifacts (routes, templates, warm
+  caches, dictionaries) stay partitioned (D-013) and sit on top. A response
+  uses its tenant's artifacts when present, otherwise the generic tier,
+  otherwise the q2-class cold path (D-016).
+- **Evaluation.** A held-out-origin slice: domains never seen in training,
+  sampled across content types and response sizes, reported alongside the
+  chronological slices (D-015).
+  - Metrics: size and CPU against the reference curve per content type and
+    size bucket, plus the D-025 memory and setup numbers.
+  - Same-origin repeats in the held-out set are reported separately.
+
+**Context.** The owner wants to improve the common case of a shared server
+for unrelated origins, where only generic HTML/JS/CSS patterns apply. The
+Google Cloud CLI (`gcloud`, `bq` 2.1.40) was installed on the build host on
+2026-10-22; the owner logs in with `gcloud auth login --no-launch-browser`.
+`bq` uses those user credentials, so no Application Default Credentials are
+needed unless a client library is added.
+
+The most recent crawl is **2026-10-01**; it finished populating the week of
+2026-10-19 (owner). Pin the date explicitly in every query. Two sources:
+
+- `httparchive.sample_data.requests_10k` and `pages_10k`, built from that
+  crawl. Upper bounds: mobile root-page `html` bodies 4.1 GB; `html`,
+  `script` and `css` together 41.4 GB.
+- `httparchive.crawl.requests` with `date = '2026-10-01'`, filtered on the
+  clustered columns (`client`, `is_root_page`, `rank`, `type`). Upper bounds
+  for mobile root-page `html`, `script` and `css`: 4.9 GB at
+  `rank <= 1000` and 42.2 GB at `rank <= 10000`.
+
+Filtering on clustering columns is what prunes the scan. Filtering on
+`url` or `page` does not: they are not clustering columns. Dry runs on the
+October mobile root-page `html`/`script`/`css` bodies:
+
+| Query | Scan |
+| --- | --- |
+| No rank filter | 61.4 TB |
+| `url IN (5,000 sampled URLs)` | 61.4 TB, the same |
+| `TABLESAMPLE SYSTEM (0.1 PERCENT)` | 60.9 GB |
+
+`TABLESAMPLE SYSTEM` bills only the storage blocks it reads, so it is the way
+to take a random cross-rank sample. 0.02–0.05% comes to about 12–30 GB.
+Sampling is block-level: rows inside a block share clustering values, so take
+a small fraction of many blocks. Split held-out origins by domain after
+extraction.
+
+**Multi-origin extract: two slices from the 2026-10-01 crawl** (owner,
+2026-10-22), reported separately throughout:
+
+| Slice | Query | Upper bound |
+| --- | --- | --- |
+| Top 10k | `rank <= 10000`, mobile root-page `html`/`script`/`css` | 42.2 GB |
+| Random cross-rank | `TABLESAMPLE SYSTEM` at about 0.03% | about 18 GB |
+
+The top 10k are the sites most likely to sit behind a CDN; the random slice
+covers the long tail. Each query is dry-run and capped on its own.
+Without dcb, cross-site patterns cannot become references. Gains have to come
+from cheaper or better modeling and from reusing parse work on public
+boilerplate. Common Crawl covers many domains (the M0 survey found broad
+coverage, though many large sites block its crawler).
+
+**Consequences.**
+
+- M1 adds a multi-origin sample with HTML, JS and CSS and its held-out-origin
+  slice.
+- M3's parse cache gains the public-library tier.
+- M4 trains the generic content-type models and runs ablations: generic tier
+  alone, tenant tier alone, both, and the cold path.
+- The engine's shared size now includes the generic tier, which D-024's
+  24 MiB shared-artifact cap must hold.
+
+**Reopen if.** The held-out-origin results show no Pareto gain over the
+reference curve at matched CPU, or generic artifacts cannot fit the shared
+budget beside tenant artifacts.
+
+## D-025: One shared immutable engine per isolate or process; per-stream state is small, slot-owned and reused; artifacts load in place  (2026-10-22, status: accepted)
+
+**Decision (accepted by the owner).** Optimize memory and startup for
+many concurrent responses, not for a single one.
+
+- **Engine (shared, immutable).** One `Engine` per Worker isolate or server
+  process holds everything that does not depend on the response:
+  - brotli static tables and LUTs;
+  - the model, warm cache and cut rules;
+  - each dictionary with its prepared match index (sidecar);
+  - precomputed entropy tables.
+
+  Natively it is `Send + Sync`, shared through `Arc` across threads, with no
+  locks or interior mutability on the encode path. In the Worker it lives in
+  the single wasm instance (D-024) and serves every concurrent request in that
+  isolate.
+- **Streams (per response, minimal).** A `Stream` borrows the engine and owns
+  only response-dependent state:
+  - retained history up to its cap;
+  - the miss hasher sized to that cap, not to `1 << lgwin`;
+  - command, table scratch and output buffers.
+
+  Streams run in D-024's slots. A finished stream's slot is reset and reused,
+  not freed and reallocated. Shared bytes (dictionaries, cache entries) are
+  never copied into a stream.
+- **Load in place.** `chunky-formats` stores artifacts offline in their
+  in-memory layout: little-endian, aligned, offset-addressed, with no
+  pointers or heap structures to rebuild. Loading is header and bounds
+  validation plus slice setup, linear in validation work, not a rebuild.
+  - In the Worker, an artifact is a bundled data module, viewed in place
+    after one copy into wasm memory.
+  - On a server it is `mmap`ed read-only, so processes on the same host share
+    the pages through the page cache.
+  - Indexes such as a dictionary's match index are computed offline, never at
+    load time (the design's sidecar).
+- **Startup.** Engine init runs once per isolate or process: lazily on the
+  first request, or in global scope when it fits the Worker's 1 s startup
+  limit. The per-response setup cost is slot reset only, with no wasm
+  instantiate and no table or index construction.
+- **Measured, not assumed.** Reports carry four numbers:
+  - the engine's resident size;
+  - per-stream incremental memory, by mode and history cap;
+  - one-time engine init time;
+  - per-response setup time.
+
+  Baselines: C brotli with one `BrotliEncoderPrepareDictionary` shared across
+  encoders, and rust-brotli's per-stream allocation.
+
+**Context.** The owner wants shared engines, dictionaries and metadata across
+parallel responses in one isolate, as zstd does with a shared `CDict`. C
+brotli's prepared dictionary is the same idea, but in memory and specific to
+one hasher. The M0 spike created a wasm instance per request, so every request
+copied the module's roughly 1 MB of data segments (brotli tables) into its own
+memory. On top of that it took 14–20 MiB of per-stream encoder state at lgwin
+22, mostly the hasher and ring buffer. D-024 already fixed one instance per
+isolate. This entry makes sharing the rule for everything response-independent.
+
+**Consequences.**
+
+- `chunky-core`'s API is `Engine` plus `Stream<'engine>` from M2 on.
+- The fork (D-020) gains a reset-and-reuse path for encoder state and a
+  hasher sized by the retained-history cap.
+- M1 reports the memory and setup baselines above.
+- M4's formats are designed for loading in place.
+- M6 validates engine and slot memory under concurrency.
+
+**Reopen if.** Loading in place costs measurable size or CPU, or Workers
+behavior (for example, isolate reuse) makes per-isolate init a poor fit.
+
 ## D-024: Artifacts ship inside the Worker bundle; fixed per-isolate stream slots; aggregate telemetry via Analytics Engine  (2026-10-21, status: accepted)
 
 **Decision (accepted by the owner; the numbers are initial caps that M6 must validate).**

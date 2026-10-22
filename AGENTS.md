@@ -39,10 +39,12 @@ affected docs. Until then, these govern.
   cold cache uses a q2-class reference encoder with the same window and flush
   policy. Every emitted reference is byte-verified, so artifacts cannot cause
   wrong output. (D-008, D-014, D-016, D-017)
-- **Learning uses approved public data only.** Shared caches, models,
+- **Learning uses approved sources only, offline.** Shared caches, models,
   dictionaries and samples all pass the same source and span eligibility gate.
-  Private traffic never trains them; repetition is not proof of publicity.
-  Secret slots are literal-only and never indexed. (D-013)
+  Live traffic never trains them; repetition is not proof of publicity.
+  Secret slots are literal-only and never indexed. (D-013; D-019 relaxes
+  header-based ineligibility for approved sources; D-026 shares a generic tier
+  across tenants)
 - **Corpus stays out of the repo.** Crawled responses live in a local data
   directory and are never committed. Tests use small synthetic or
   permissively-licensed fixtures. (D-007)
@@ -114,12 +116,10 @@ build → commit loop, on-demand reviews, and the human commit gate.
 
 ## Current status
 
-Milestone **M0 (plan the plan)**: the feature set, architecture, and milestone
-ladder include the design-review corrections. The initial corpus is accepted
-(manual Google Search netlogs, D-018). The rust-brotli injection spike is done
-(fork mechanics: D-020), as are the netlog extraction spike and the
-opportunity probe (go), and the Worker spike (shell: D-021).
-Toolchain, architecture caps and corpus policy are set (D-022–D-024). M0 exits
-when the owner says the plan is ready to build. See [docs/plan.md](docs/plan.md). No
-code exists yet beyond `tools/netlog/`; workspace scaffolding is M1. Keep this paragraph short and
-current when plan.md milestone status changes (rule 4).
+**M0 (plan the plan) is done** (2026-10-22): spikes, corpus policy, toolchain,
+architecture caps, shared engine and generic tier are decided (D-018–D-026).
+**M1 is next:** the D-023 workspace and check script, then the corpus pipeline
+and baselines. `tools/` holds the M0 netlog extractor, flush scanner and the
+capture extension; no workspace code exists yet. See
+[docs/plan.md](docs/plan.md). Keep this paragraph short and current
+when plan.md milestone status changes (rule 4).
