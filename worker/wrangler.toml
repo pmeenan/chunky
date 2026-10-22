@@ -1,0 +1,18 @@
+# M1 minimal reference-encoder Worker (D-004, D-021): a compressing proxy that
+# encodes origin bodies with the rust-brotli reference encoder in wasm.
+# Deploying is the owner's call; `npm run dev` runs it locally in workerd.
+name = "chunky"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+
+[[rules]]
+type = "CompiledWasm"
+globs = ["**/*.wasm"]
+fallthrough = false
+
+[vars]
+# Reference quality and window. q2 is the cold path class (D-016).
+CHUNKY_QUALITY = "2"
+CHUNKY_LGWIN = "22"
+# Local testing only: forward to this origin instead of the request's host.
+CHUNKY_ORIGIN = ""

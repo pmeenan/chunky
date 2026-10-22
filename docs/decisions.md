@@ -30,6 +30,77 @@ Decision / Context / Consequences / Reopen if
 
 ---
 
+## D-028: M1 exit: go; Pareto targets set against the C curve; parse cache (M3) before route models (M4); dcb stays after M5  (2026-10-22, status: accepted)
+
+**Decision (the owner's M1 exit call, from [m1-report.md](m1-report.md)).**
+
+- **Go.** Proceed to M2 as planned. The opportunity holds on every source:
+  the q2-class cold path is 21% (Google), 32% (Etsy) and 12–62%
+  (multi-origin, by type and size) bigger than C q11, at about 300× less CPU.
+- **Pareto targets** for M3/M4 evaluation, per route on its own logical
+  flush schedule, against the pinned C reference curve (D-016):
+
+  | Axis | Target |
+  | --- | --- |
+  | Size | At or below C q9 (Google served 1.062 × q11, Etsy 1.125); stretch C q10 (about 1.02) |
+  | CPU | At or below C q2 + 50%, per response including setup (about 4.8 ms/MB native and 6.2 ms/MB V8 C wasm on the M1 host) |
+  | Memory | Within D-024's 16 MiB full slot at lgwin 22 |
+  | Latency | No added delay; the logical flush schedule is unchanged |
+
+- **M3 before M4.** On templated pages the high-quality gain is parse
+  quality (q9 → q10 is 5–11%; literal context modeling 0.7–1.7%), and the
+  funnel shows 26–72% of bytes in chunks seen earlier.
+- **dcb with an existing dictionary stays in M8**, after M5. Google's
+  dictionary saves 23% at q5 and up, but only for Google-like targets, and it
+  needs C-style dictionary addressing in the fork.
+- **Production Worker CPU** (`$workers.cpuTimeMs`) moves to M6; M1 closes on
+  local V8 numbers, labeled relative (D-023).
+- **Capture continues** on D-022's cadence. M1 closes with two sessions, so
+  corpus numbers stay indicative; slices freeze (D-027) before M3/M4
+  evaluation, and the baselines are rerun then.
+- **Vendored trees stay plain copies**, amending D-023's "git subtree": the
+  provenance notes (`crates/brotli/CHUNKY.md`,
+  `third_party/google-brotli/VENDORED.md`) record the upstream commits.
+
+**Context.** M1 measurements, commands and the decomposition are in
+[m1-report.md](m1-report.md).
+
+**Reopen if.** More sessions move the Google or Etsy gap materially, or the
+M3 search-effort sweep shows the targets are out of reach at the CPU bound.
+
+## D-027: Corpus slices are assigned per site; pre-freeze sessions split 75/25 training/tuning; evaluation is post-freeze only  (2026-10-22, status: accepted)
+
+**Decision (proposed by the M1 corpus work; accepted by the owner at the M1 exit).**
+Amends D-022's "Slices" bullet.
+
+- **Per site, not per session.** Each site's sessions are assigned in
+  capture order on their own (`data/corpus/slices.json`, written by
+  `tools/netlog/slices.py`). Etsy first appears in the 2026-10-22 session, so
+  whole-session assignment would have left it with no training data.
+- **Evaluation needs a freeze.** Sessions that exist before `frozen_at` are
+  pre-freeze: the earliest 75% train and the latest 25% tune (at least one
+  tuning session once a site has two). That is D-022's 60/20 ratio with the
+  evaluation share removed. Only sessions captured at or after `frozen_at`
+  are evaluation. `slices.py --freeze <ISO time>` records the split once, and
+  adding sessions never reshuffles it.
+- **Template change** is per site: a change in the dictionary hash or the
+  JS build markers versus the site's previous session
+  (`data/corpus/templates.json`). Google redeployed mid-session on
+  2026-10-22, so nearly every Google session will be one.
+
+**Context.** Two sessions exist (2026-10-21 Google only; 2026-10-22 Google
+and Etsy). D-022's named carriers were estimated at about 1.7% of Google's
+decoded bytes; with signed `/goto` and `/url` parameters, `ved`, `sxsrf` and
+`usg` counted, excluded spans are 11.4% of Google bytes (carriers 10.1%,
+cross-session rule 1.2%, cookie values 0.006%) and 0.3% of Etsy's.
+
+**Consequences.** M3/M4 train on `training`, tune on `tuning`, and report
+evaluation only from post-freeze sessions. Freezing happens when the cut
+rules and models are frozen, before the next capture.
+
+**Reopen if.** A site's sessions are too few to give it a tuning session, or
+the owner prefers whole-session assignment with per-site exceptions.
+
 ## D-026: Generic multi-origin tier: public-trained, cross-tenant artifacts beneath per-tenant ones, evaluated on held-out origins  (2026-10-22, status: accepted)
 
 **Decision (accepted by the owner).** A shared server compressing many
@@ -295,7 +366,7 @@ Workers Paid, where CPU per request defaults to 30 s and can go up to 5 min.
 **Reopen if.** The artifacts exceed the bundle or startup limits, or measured
 runtime overhead leaves fewer than 3 full slots.
 
-## D-023: Toolchain: pinned stable Rust, edition 2024 workspace, vendored rust-brotli and C brotli v1.2.1, one check script locally and in CI  (2026-10-21, status: accepted)
+## D-023: Toolchain: pinned stable Rust, edition 2024 workspace, vendored rust-brotli and C brotli v1.2.1, one check script locally and in CI  (2026-10-21, status: accepted; vendoring as plain copies per D-028)
 
 **Decision (accepted by the owner).**
 

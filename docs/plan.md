@@ -204,7 +204,7 @@ returned a no-go. Q1's single-block browser research is parked; the initial
 fallback is the accepted per-flush design. M0 remains open until that owner
 call; this revision does not claim the spikes are complete.
 
-## Milestone ladder  `M1 next`
+## Milestone ladder  `M2 next`
 
 All reported results name corpus/split/artifact versions and exact commands.
 Model/cache/cut rules are frozen before evaluation, with no evaluation-driven
@@ -212,7 +212,7 @@ updates. Same-response warm replay is diagnostic, separate from generalization.
 Success means a Pareto improvement over the measured reference quality curve
 (D-016); gap recovery over q1 is a diagnostic.
 
-### M1: Workspace, corpus and opportunity measurement  `pending`
+### M1: Workspace, corpus and opportunity measurement  `done (2026-10-22)`
 
 Cargo workspace, native/wasm reference builds, fmt/clippy/test and license audit.
 The netlog extractor, served-stream flush recovery, route labels and corpus
@@ -246,7 +246,37 @@ measure CPU and resource overhead. Measure wasm CPU in V8 (workerd), not
 wasmtime, with the pinned C source also compiled to wasm32 as the Worker CPU
 baseline. Check that rust-brotli produces identical bytes natively and in wasm.
 
-**Exit:** reproducible baseline/funnel/decomposition reports and wasm
+Progress (2026-10-22; results and commands in [m1-report.md](m1-report.md)):
+
+- [x] D-023 workspace, `scripts/check.sh` (fmt, clippy, tests, wasm32,
+      cargo-deny, tool syntax) and its GitHub Actions workflow. C brotli
+      v1.2.1 and rust-brotli `6518a4e` vendored as plain copies (subtree
+      conversion is history-only; see their provenance notes).
+- [x] Extractor m1.1: `chunky flushes` replaces `flushscan`; `session.json`,
+      excluded spans (carriers, cookie values, cross-session diff), repeat and
+      duplicate labels, template markers and per-site slices (proposed D-027).
+      Re-extraction reproduced both sessions exactly.
+- [x] Reference curve sizes q0–q11, C and rust-brotli, buffered, served,
+      synthetic per-read and unflushed per-read schedules; Google's
+      dictionary curve and what Google and Etsy served.
+- [x] Effective match reach (RE-002 confirmed for rust-brotli), gap
+      decomposition (context modeling, q9 vs q11, lgwin, static dictionary),
+      repeatability funnel, D-025 memory baselines.
+- [x] Native vs wasm byte identity: rust-brotli and C (wasi-sdk) 1,410/1,410
+      each. Minimal reference-encoder Worker runs locally.
+- [x] CPU: native C vs rust-brotli curve and per-response setup time
+      (`chunky bench`), V8 wasm CPU and memory for both.
+- [x] Multi-origin sample: HTTP Archive top10k and random slices (about
+      $1.70), Common Crawl Wikimedia and 5 Shopify stores; held-out-origin
+      split, reference curve by type and size, held-out chunk reuse.
+- [x] Owner's exit call (D-028): go; Pareto targets; M3 before M4; dcb
+      stays in M8; D-027 accepted.
+- Moved out of M1 by D-028: production Worker CPU (`$workers.cpuTimeMs`)
+  goes to M6. Capture sessions continue on D-022's cadence (two exist, so
+  corpus results are indicative); slices freeze before M3/M4 evaluation and
+  the baselines are rerun then.
+
+**Exit (met 2026-10-22, D-028):** reproducible baseline/funnel/decomposition reports and wasm
 measurements. The owner makes a go/change call and records Pareto targets
 (size, CPU, latency, memory) against the reference curve before M3/M4
 evaluation. Using the decomposition, the owner also decides (a) whether the
@@ -286,15 +316,19 @@ chunk boundary. Resolve short codes and contexts at emit time. Cold/rejected
 artifacts use the q2-class reference path (D-016).
 
 **Exit:** held-out reusable-parse coverage, successfully resolved legal-reference
-coverage, size and CPU against the reference curve under fast and oracle tables. Report
+coverage, size and CPU against the reference curve under fast and oracle tables.
+Sweep miss-search effort (candidates, chain depth, early-exit length, lazy
+matching) and report its size/CPU curve by route and content type, the input
+to M4's learned search policy. Report
 same-response warm replay separately. Exercise absent/out-of-window targets,
 changed templates and adversarial cache states through differential fuzzing;
 no invalid bytes or learning-gate bypasses.
 
 ### M4: Route models and versioned artifact loading  `pending`
 
-Offline context maps, priors, pruned tables and small-block policy, per
-route and per content type for the generic tier (D-026). Implement
+Offline context maps, priors, pruned tables, small-block policy and search
+policy (miss-search effort, dictionary-hit shortcut), per route and per
+content type for the generic tier (D-026). Implement
 `chunky-formats` serialization and validated native/wasm in-place loading
 (D-025: offline-built in-memory layout, no parse-time rebuild) for the model
 and warm cache, including site/route, chunker and compatibility metadata and
@@ -303,7 +337,7 @@ select the cold path before commitment. Complete single-block tables are deferre
 with the parked experiment.
 
 **Exit:** size/CPU ablations for cache alone, model alone and both on frozen
-held-out data, plus generic tier alone, tenant tier alone and both on the
+held-out data, and learned search policy against the best fixed setting, plus generic tier alone, tenant tier alone and both on the
 held-out-origin slice (D-026); cold and stale-model regressions reported by route against the
 M1 targets. Matching native/wasm results for identical logical inputs/options;
 loader rejects invalid lengths/offsets/versions within a bounded memory budget.
@@ -337,7 +371,8 @@ account for shared blobs, refresh/growth peaks, JS/wasm transfers and headroom.
 The q2-class fallback also needs a reservation. Apply backpressure and cancel
 origin reads on downstream cancellation; cleanup is mandatory, recording is shed.
 
-**Exit:** real-origin size/CPU/memory/latency against the M1 targets, including
+**Exit:** real-origin size/CPU/memory/latency against the M1 targets (D-028),
+with production Worker CPU from `$workers.cpuTimeMs` (moved from M1), including
 engine resident size, per-stream incremental memory, one-time engine init and
 per-response setup time (D-025); fault
 injection and concurrent long-lived slow-consumer tests remain within budget,
@@ -367,7 +402,9 @@ rules. Use capped `max_distance` geometry, not uncapped response position.
 before/after window saturation, dictionary start/end, short codes and built-in
 static words. Plain-br clients never receive external-dictionary references.
 Measure generation time and size against full q11-with-dictionary, including
-framing bytes and dictionary memory. Dictionary plus response need not fit the
+framing bytes and dictionary memory. Report size and CPU with the
+dictionary-hit search shortcut (design.md, Misses) off, at fixed minimum
+lengths, and as learned per content type. Dictionary plus response need not fit the
 rolling window.
 
 ### M9: Generated public site dictionary  `pending`
@@ -378,6 +415,7 @@ with `Use-As-Dictionary`. Store logical dictionary-relative cache references.
 **Exit:** provenance/eligibility checks cover every published chunk; negotiated
 dcb round trips and plain-br fallback pass. Measure document size with/without
 CDT on held-out responses, including dictionary acquisition cost separately.
+Report the dictionary-hit search shortcut's size and CPU effect on documents.
 
 ## Exact-length single-meta-block experiment  `parked (after M5)`
 

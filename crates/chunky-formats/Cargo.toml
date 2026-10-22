@@ -1,0 +1,13 @@
+[package]
+name = "chunky-formats"
+description = "Versioned, validated on-disk formats (model and warm-cache blobs from M4, sidecars from M8)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

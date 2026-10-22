@@ -1,0 +1,6 @@
+# D-023: pinned stable toolchain. Raise deliberately, never by drifting.
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]
+profile = "minimal"

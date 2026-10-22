@@ -34,6 +34,90 @@ responses, and weaken strong `ETag`s).
 
 ---
 
+## RE-010: HTTP Archive `response_body` is not always the served bytes  (2026-10-22, status: worked-around)
+
+**Environment.** `httparchive.crawl.requests`, crawl 2026-10-01, mobile
+root pages, `html`/`script`/`css` (`tools/corpus/httparchive.py`).
+
+**Observed.** Comparing `response_body` with HTTP Archive's own hash of the
+body as received (`payload._body_hash`):
+
+| Fidelity | top10k rows | random rows |
+| --- | --- | --- |
+| exact | 430,711 | 225,530 |
+| no `_body_hash` (unverified) | 12,768 | 3,408 |
+| shorter, tail ends mid-token (truncated) | 12,030 | 10,104 |
+| CRLF stored as LF | 11,554 | 8,678 |
+| byte-order mark stripped | 185 | 138 |
+| capped at about 8.0–8.8 MB (reported 9–19 MB) | 45 | 18 |
+| longer, or same size but different | 241 | 137 |
+
+So 5.1% (top10k) and 7.7% (random) of rows with a body differ from the
+served bytes. Bodies are stored as UTF-8 STRING, decoded from any
+Content-Encoding. An empty body is NULL, and 54,645 top10k status-200 rows
+have no body at all.
+
+**Expected.** Exact response bytes.
+
+**Impact.** Every multi-origin manifest row carries `fidelity`, and the
+measurement tools use only `exact` and `unverified` rows. Size results for
+CRLF-heavy or legacy-charset sites are therefore under-represented. Do not
+use HTTP Archive bodies where exact bytes matter without checking
+`_body_hash`.
+
+## RE-009: rust-brotli q2–q5 lose 9–20% once input passes the 2^(lgwin+1) ring buffer  (2026-10-22, status: worked-around)
+
+**Environment.** Vendored rust-brotli at the fork base (`6518a4e`,
+`portable-float`) vs pinned C google/brotli v1.2.1, lgwin 18, buffered single
+feed, 94 corpus pages (two sessions, Google and Etsy). Command:
+`chunky baseline <sessions> --qualities 2,5,9,11 --lgwins 18,24`.
+
+**Observed.** rust/C size ratio by page size at lgwin 18:
+
+| Page size | Pages | q2 | q5 |
+| --- | --- | --- | --- |
+| 256–512 KiB | 45 | 1.000 | 1.000 |
+| 512 KiB–1 MiB | 28 | 1.094 | 1.101 |
+| over 1 MiB | 21 | 1.201 | 1.206 |
+
+q9 and q11 match C at lgwin 18 (within 0.3%). At lgwin 22 and 24, where no
+page wraps the 8 MiB ring buffer, rust matches C at every quality. Both use
+the same hasher type (`ChooseHasher`), so the loss starts exactly where the
+ring buffer wraps: the H2–H5 path finds fewer matches after the wrap.
+
+**Expected.** rust-brotli is a port and should track C at every window.
+
+**Impact.** D-024's small fallback slot plans lgwin-18 q2-class encoding,
+and M2's retained-history cap sits below the ring buffer. Both hit this on
+pages over 512 KiB. Fixed in the fork (below); the patch is upstreamable.
+
+**Root cause.** The bulk hash-store fast paths, `StoreRangeOptBasic` (H2–H4,
+H54) and `StoreRangeOptBatch` (H5/H6 with 4-byte hashes), wrote the
+ring-buffer-masked index `ix & mask` into the buckets, while `Store`,
+`FindLongestMatch` and C store the unmasked position. Below the ring buffer
+size the two are equal. After the first wrap every bulk-stored entry (the
+interior of each emitted copy) reads as `cur_ix - (ix & mask)`, at least one
+ring buffer back, which exceeds `max_backward`, so the match is dropped. q9+
+use other hashers, and lgwin 22/24 never wrapped on this corpus.
+
+**Fix.** Fork patch in `backward_references/mod.rs`: store the unmasked
+position and mask only the data read (`crates/brotli/CHUNKY.md`). Upstreamable
+as-is. Integer-only, so native and wasm stay identical, and output is
+byte-identical below the ring buffer size (all 180 rust encodes of pages
+≤ 512 KiB unchanged). Same baseline command at q2–q5, lgwin 18, buffered,
+rust/C size ratio after the fix:
+
+| Page size | Pages | q2 | q3 | q4 | q5 |
+| --- | --- | --- | --- | --- | --- |
+| 256–512 KiB | 45 | 1.000 | 1.000 | 1.000 | 1.000 |
+| 512 KiB–1 MiB | 28 | 1.000 | 1.000 | 1.000 | 1.000 |
+| over 1 MiB | 21 | 1.000 | 1.000 | 1.000 | 0.999 |
+
+Worst page 1.005 (q2, pre-existing, below the wrap). Regression test:
+`chunky-core` `reference::tests::tracks_c_after_ring_buffer_wrap` (1.25 MiB
+synthetic input at lgwin 18; 1.19 at q2 and 1.22 at q5 without the fix).
+Status flips to fixed-upstream once dropbox/rust-brotli takes the patch.
+
 ## RE-008: Common Crawl's CDX server times out; repeated Parquet index scans get the host throttled  (2026-10-21, status: open)
 
 **Environment.** Common Crawl CC-MAIN-2026-34/39/43, from the build host.
@@ -57,6 +141,10 @@ responses, and weaken strong `ETag`s).
   re-scan all 300 files per question.
 - Keep WARC record fetches sequential and paced.
 - A 403 from the CDN means back off for hours. Never route around it.
+- 2026-10-22: the `cluster.idx` + CDX block approach with 1 request per
+  second ran about 1,500 requests and two 105 MB `cluster.idx` downloads
+  without throttling (one 504, recovered after a 30 s back-off)
+  (`tools/corpus/commoncrawl.py`).
 
 ## RE-007: Origin fetches ignore `Accept-Encoding: identity`; Workers get decoded bodies in tiny reads  (2026-10-21, status: open)
 
@@ -251,6 +339,8 @@ quality.
 which inflates the q1→q11 gap and makes q1 a poor cold path. D-016 makes the
 fallback q2-class and requires reporting each quality's effective reach.
 Baseline tools must feed inputs with the same call and flush pattern they claim.
+Checked in M1 (`chunky reach`): rust-brotli `6518a4e` and C v1.2.1 behave the
+same, and a single q0/q1 call reaches back 64 KiB but not 256 KiB.
 
 ## RE-001: Partial literal output does not require a completed copy  (2026-10-21, status: worked-around)
 

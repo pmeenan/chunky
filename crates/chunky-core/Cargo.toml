@@ -1,0 +1,18 @@
+[package]
+name = "chunky-core"
+description = "chunky encoder core: no filesystem, threads or clocks; builds for wasm32"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+brotli.workspace = true
+
+[dev-dependencies]
+brotli-c.workspace = true
+proptest.workspace = true
+
+[lints]
+workspace = true

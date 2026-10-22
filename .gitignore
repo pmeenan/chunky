@@ -6,3 +6,11 @@ target/
 
 # Python bytecode
 __pycache__/
+
+# Worker build output and dependencies
+/worker/node_modules/
+/worker/dist/
+/worker/.wrangler/
+
+# Claude Code session worktrees
+/.claude/worktrees/

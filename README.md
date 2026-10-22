@@ -26,9 +26,32 @@ What else is in or out of scope is being triaged in
 
 ## Status
 
-**Pre-code, milestone M0 (planning).** No code exists yet. The first
-measurement milestone measures reuse on later responses held out from training,
-against the full reference brotli quality curve. See [docs/plan.md](docs/plan.md).
+**M1 (workspace, corpus and opportunity measurement) is done; M2 is next.**
+The Cargo workspace, the pinned C and rust-brotli reference encoders, corpus
+tooling and the M1 baselines exist; the encoder itself starts in M2. See
+[docs/plan.md](docs/plan.md) and [docs/m1-report.md](docs/m1-report.md).
+
+## Building and checking
+
+Host prerequisites (D-023): Rust via rustup (the toolchain is pinned in
+`rust-toolchain.toml`), `clang` and `lld`, wasi-sdk 34 under `~/.local` (for
+the C wasm32 baseline), Node 24, and `cargo install --locked cargo-deny`.
+
+```bash
+scripts/check.sh
+```
+
+runs `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D
+warnings`, `cargo test --workspace`, the wasm32 build of `chunky-wasm` and the
+fork, Worker stream/identity regression tests, `cargo deny check licenses bans`,
+and syntax checks on `tools/` and `worker/`. On a shared measurement host, wrap it:
+`hostlock shared --label "chunky: check" -- scripts/check.sh`.
+
+The `chunky` CLI (`cargo build --release -p chunky-cli`) holds the
+measurement tools: `flushes`, `baseline`, `summarize`, `reach`, `mem`,
+`parse-stats`, `funnel`, `generic-reuse` and `bench` (which takes `hostlock
+exclusive` itself).
+[docs/m1-report.md](docs/m1-report.md) lists the exact commands.
 
 ## How it's built
 

@@ -4,7 +4,9 @@
 > shell by D-021, toolchain and layout by D-023, and blob delivery and initial
 > resource caps by D-024 (to be validated in M6).
 > This document specifies the required interfaces and behavior; it does not
-> claim they are implemented.
+> claim they are implemented. As of M1 the workspace layout exists:
+> `chunky-core` holds only the reference-encoder driver, `chunky-wasm` exposes
+> the slot exports over it, and `worker/` is a minimal proxy shell.
 > The encoder mechanisms are in [design.md](design.md).
 
 ## Fixed points

@@ -11,11 +11,10 @@ to commit is **one agent, one pass, one human scan**.
 ## The loop
 
 1. **Build.** One agent implements the task (scope from
-   [plan.md](plan.md)), runs the repo's checks (Rust workspace: expected to
-   be `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`, plus a
-   wasm32 build of the Worker; the README lists the exact commands once the
-   toolchain lands in M1), and ends with a short note: what changed, what was
-   verified. Any change to encoder output is verified by decoding with an
+   [plan.md](plan.md)), runs the repo's checks (`scripts/check.sh`: fmt,
+   clippy `-D warnings`, Rust and Worker tests, the wasm32 build, cargo-deny and
+   tool syntax checks; see the README), and ends with a short note: what
+   changed, what was verified. Any change to encoder output is verified by decoding with an
    independent reference decoder, not only our own.
 2. **Commit.** The human scans the note and the diff at whatever depth the
    change warrants, and either commits directly or asks the agent to commit.

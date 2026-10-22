@@ -1,0 +1,20 @@
+[package]
+name = "chunky-wasm"
+description = "wasm32 cdylib with raw slot exports (D-021/D-024) for the Worker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+chunky-core.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+brotli-decompressor = { workspace = true, features = ["std"] }

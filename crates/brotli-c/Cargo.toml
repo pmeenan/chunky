@@ -1,0 +1,18 @@
+[package]
+name = "brotli-c"
+description = "The pinned C google/brotli release (D-023): CPU baseline encoder and independent reference decoder"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "Apache-2.0 AND MIT"
+publish.workspace = true
+build = "build.rs"
+links = "brotlic"
+
+[dependencies]
+
+[build-dependencies]
+cc.workspace = true
+
+[lints]
+workspace = true

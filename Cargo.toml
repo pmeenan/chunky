@@ -1,0 +1,51 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/brotli",
+    "crates/brotli-c",
+    "crates/chunky-core",
+    "crates/chunky-formats",
+    "crates/chunky-cli",
+    "crates/chunky-wasm",
+]
+# The fork's upstream FFI crate is not part of the build (D-020).
+exclude = ["crates/brotli/c"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+license = "Apache-2.0"
+repository = "https://github.com/pmeenan/chunky"
+publish = false
+
+[workspace.dependencies]
+brotli = { path = "crates/brotli", default-features = false, features = ["std", "portable-float"] }
+brotli-c = { path = "crates/brotli-c" }
+brotli-decompressor = { version = "=6.0.1", default-features = false }
+chunky-core = { path = "crates/chunky-core" }
+chunky-formats = { path = "crates/chunky-formats" }
+anyhow = "1.0.104"
+cc = "1.9.0"
+clap = { version = "4.6.7", features = ["derive"] }
+proptest = "1.12.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "warn"
+
+# Benchmarks and baselines run the release profile; one codegen unit and fat
+# LTO keep results independent of crate partitioning.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+debug = "line-tables-only"
+
+[profile.wasm]
+inherits = "release"
+debug = false

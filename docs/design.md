@@ -136,7 +136,9 @@ Distance short codes (`0..15` against brotli's 4-entry last-distance ring buffer
 
 **Slots.** A chunk containing a dynamic value never repeats, so with content-defined boundaries alone the template bytes around every slot would never be cached. Two mechanisms recover them: on a prefix hit, extend by `memcmp` to the divergence point, reuse the verified prefix's parse commands (copies still need a source in the current response or negotiated dictionary), emit the value as literals, and re-sync the suffix with a local search near the cached neighbor; then, once the same divergence point has been seen N times in eligible public training captures, store a frozen cut rule ("at a boundary whose prefix hashes to X, also cut at offset Y") so prefix and suffix become admissible chunks of their own. Template hints from the application produce the same cuts directly.
 
-**Misses** run a q1-class hasher over the chunk with predicted-distance hints from neighboring hits as first candidates and deterministic limits on candidates/bytes compared (D-014). The offline trainer may compute q11-quality parses of eligible public chunks for the next artifact version; live misses do not export samples or mutate the model. Cached regions are indexed sparsely for the fast hasher rather than hashing every byte.
+**Misses** run a q1-class hasher over the chunk with predicted-distance hints from neighboring hits as first candidates and deterministic limits on candidates/bytes compared (D-014). How exhaustively it searches is the route model's learned search policy, not a fixed quality level. The offline trainer may compute q11-quality parses of eligible public chunks for the next artifact version; live misses do not export samples or mutate the model. Cached regions are indexed sparsely for the fast hasher rather than hashing every byte.
+
+**A long dictionary hit ends the search.** When a miss finds a verified match into a negotiated CDT dictionary of at least a minimum length (one fine chunk, or a configured floor such as 32 bytes), the encoder takes it, extends it by `memcmp` in both directions, and does not search the window for that span. The window search is the expensive part of a miss, and a long dictionary match leaves little for it to win. The price is distance cost: a dictionary distance lies beyond `max_distance`, so it costs roughly `log2(window)` more extra bits than a nearby window copy and rarely reuses the last-distance ring buffer, and a window match could have been longer. One check stays because it costs no search: a predicted-distance hint already in hand that covers the same span is verified first and preferred, since its distance is cheaper. Built-in static-dictionary words (4–24 bytes) are too short to end a search; they are taken only when no window match of at least the same length is found. Whether to take the shortcut, and its minimum length, is part of the learned search policy (per route and content type, trained on training slices only), with a fixed default when no model applies. Measure it before relying on it: the win depends on how often a window copy would have been shorter in distance or longer in length.
 
 **Admission** requires an approved public source and eligible spans before any cache, model or sample derivation (D-013). Frequency across eligible captures can prioritize useful chunks, but cannot prove content public. The offline builder selects a size-capped warm set; Worker lookups never mutate LRU state. Artifact refreshes retire obsolete chunks.
 
@@ -151,6 +153,7 @@ The expensive modeling decisions are pre-trained per route and loaded at runtime
 - Prior histograms for literals per context, commands and distances.
 - A ladder of table sets at different description budgets (about 10, 30, 80 and 300 bytes) for the small-meta-block fallback.
 - Size and flush-size distributions, used by the streaming layout.
+- Search policy, per route and content type and optionally per chunk class or slot type: how hard a miss looks for the longest match (candidates per position, chain depth, an early-exit "good enough" length, lazy matching on or off, whether to try static-dictionary words) and the dictionary-hit shortcut's minimum length, or off (see Parse cache, Misses). Each setting is chosen offline from its measured size/CPU trade-off on training slices and shipped as an artifact constant, so output stays deterministic (D-014); the runtime work caps still bound it. A route whose content rarely repeats can search little; one with long distant repeats can afford more.
 
 **Built at flush, per meta-block:** the initial per-flush layout has all block commands available before its header; the parked experiment needs a different policy (D-012):
 
@@ -465,6 +468,10 @@ D-007; trainer derivation and exported artifacts require eligibility filtering.
 - [ ] Reusable parse coverage and resolved legal-reference coverage separately,
   with/without frozen cut rules and with synthetic template hints.
 - [ ] Actual table/header/alignment cost and thresholds for small blocks.
+- [ ] Search policy: size and CPU across miss-search effort settings
+  (candidates, chain depth, early-exit length, lazy matching) and the
+  dictionary-hit shortcut's minimum length, per route and content type;
+  learned per-route settings against the best single fixed setting.
 - [ ] Per-flush CPU, total withheld bytes, added delivery latency and unmatched
   tails; no unmeasured delay bounds; compare flush policies (every read, coalesce available reads, minimum bytes unless idle).
 - [ ] Failure injection before headers, within a command/block, at boundaries

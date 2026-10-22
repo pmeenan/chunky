@@ -58,11 +58,13 @@ affected docs. Until then, these govern.
 | ------- | ---------------- |
 | `docs/` | Design, vision, plan, architecture, decisions, features, rough edges, workflow |
 | `data/` | Local corpus (captured netlogs, crawls) and derived data. Git-ignored, never committed (D-007) |
-| `tools/netlog/` | Netlog extractor (`extract.py`), query panel and Etsy list, served-stream flush scanner (`flushscan`, standalone crate until M1) |
+| `crates/` | Cargo workspace (D-023): `brotli` (rust-brotli fork), `brotli-c` (pinned C baseline + reference decoder), `chunky-core`, `chunky-formats`, `chunky-cli` (binary `chunky`), `chunky-wasm` |
+| `third_party/google-brotli/` | Vendored C brotli v1.2.1 |
+| `worker/` | Cloudflare Worker JS shell, `wrangler.toml`; `worker/bench/` has the V8 wasm harness |
+| `scripts/check.sh` | The repo's checks, locally (under `hostlock shared`) and in CI |
+| `tools/netlog/` | Netlog extractor (`extract.py`), cross-session spans (`spans.py`), slices (`slices.py`), query panel and Etsy list |
+| `tools/corpus/` | Multi-origin sample extraction (HTTP Archive, Common Crawl) |
 | `tools/capture/` | Capture-session extension, link page and `deploy.sh` to `chunky.meenan.dev/capture/` (D-022) |
-
-The Cargo workspace (core, CLIs, Worker) lands in M1. Update this table when it
-does.
 
 ## Doc map: pull what the task needs, not everything
 
@@ -78,6 +80,7 @@ build → commit loop, on-demand reviews, and the human commit gate.
 | [docs/architecture.md](docs/architecture.md) | Crate/Worker structure and how the design maps onto them |
 | [docs/decisions.md](docs/decisions.md) | Settled choices (D-NNN). Scan headings; read only the entries your task touches |
 | [docs/rough-edges.md](docs/rough-edges.md) | Findings log (RE-NNN). Grep before adding a finding or debugging weirdness |
+| [docs/m1-report.md](docs/m1-report.md) | M1 baselines: reference curve, reach, decomposition, funnel, memory, CPU, wasm; exact commands |
 
 ## Rules for all agents
 
@@ -116,10 +119,10 @@ build → commit loop, on-demand reviews, and the human commit gate.
 
 ## Current status
 
-**M0 (plan the plan) is done** (2026-10-22): spikes, corpus policy, toolchain,
-architecture caps, shared engine and generic tier are decided (D-018–D-026).
-**M1 is next:** the D-023 workspace and check script, then the corpus pipeline
-and baselines. `tools/` holds the M0 netlog extractor, flush scanner and the
-capture extension; no workspace code exists yet. See
+**M0 and M1 are done** (2026-10-22). M1's baselines are in
+[docs/m1-report.md](docs/m1-report.md); its exit (D-028) set the Pareto
+targets against the C curve, put the parse cache (M3) before route models
+(M4) and kept dcb in M8. **M2 is next:** command injection and per-flush
+output in the fork. Capture sessions continue. See
 [docs/plan.md](docs/plan.md). Keep this paragraph short and current
 when plan.md milestone status changes (rule 4).
