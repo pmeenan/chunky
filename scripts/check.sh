@@ -29,7 +29,7 @@ cargo test --workspace
 step "wasm32 build (chunky-wasm and the fork)"
 cargo build --target wasm32-unknown-unknown --profile wasm -p chunky-wasm -p brotli
 
-step "Worker stream and identity regression tests"
+step "Worker stream tests and native-vs-wasm identity"
 node --test worker/test/*.test.mjs
 
 step "cargo deny"

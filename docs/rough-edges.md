@@ -34,6 +34,49 @@ responses, and weaken strong `ETag`s).
 
 ---
 
+## RE-012: Native meta-block writers assume every copy emits at least two bytes  (2026-10-22, status: worked-around)
+
+Static-dictionary transforms can legally produce one byte (for example,
+four-byte word 0 with transform 23, omit-last-3). Accepting a dense injected
+parse of these overflowed the external writer's command scratch, sized for
+one command per two bytes. Merely growing that scratch exposed another
+assumption: greedy tables read the two preceding bytes after the first
+copy, even when only one byte has been produced. The external verifier now
+demotes dictionary copies shorter than two bytes to literals, preserving
+the native writer's invariants. Regression:
+`stream::tests::one_byte_dictionary_copies_round_trip`, checked with C,
+Rust and the inspector at table qualities 2, 5 and 11.
+
+## RE-011: Replaying a rust-brotli q11 parse exactly needs each command's distance code, not just its distance  (2026-10-22, status: worked-around)
+
+**Environment.** Fork at `6518a4e` with `portable-float`, lgwin 22, buffered
+single feed; M2 `chunky-core` test `captured_q11_parse_replays_exactly`
+(synthetic fixtures).
+
+**Observed.** A q11 parse re-injected with q11 tables on its own meta-block
+layout came out the same size as the reference stream but with different
+bytes on the `mixed` fixture. Zopfli sometimes codes a distance explicitly
+(code ≥ 16) even when a short code (0–15) would resolve to it, because it
+picks codes by cost. A writer that re-derives codes greedily
+(`ComputeDistanceCode`) turns those into short codes. The M0 spike saw the
+reverse case: the meta-block callback (`log_meta_block`) reports only final
+distances, so short codes chosen by cost were lost too.
+
+**Fix.** The fork's parse log records each command's distance code, and
+`Reference::Window::short_code` carries it as a hint: a short code is
+honoured when it still resolves to the same distance, and
+`EXPLICIT_DISTANCE` (16) forces the explicit form. With that, replay is
+byte-identical to reference q11 on every fixture.
+
+**Related upstream bug (fixed in the fork).** rust-brotli's `encode_data`
+passed `ringbuffer_.data_mo.slice()` to `ChooseContextMode` without the
+`buffer_index` (2) offset, so its q10/q11 UTF-8 test read a window two bytes
+earlier than C (`ringbuffer_.buffer_`). The fork now passes the offset slice.
+It matters only at the 75% UTF-8 threshold: no M1 corpus page changed at
+q10/q11 (`chunky baseline`, both sessions, buffered/served/reads). Regression
+test `reference::tests::literal_context_mode_matches_c_at_the_utf8_threshold`;
+upstream status in `crates/brotli/CHUNKY.md`.
+
 ## RE-010: HTTP Archive `response_body` is not always the served bytes  (2026-10-22, status: worked-around)
 
 **Environment.** `httparchive.crawl.requests`, crawl 2026-10-01, mobile

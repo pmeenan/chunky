@@ -30,10 +30,11 @@ affected docs. Until then, these govern.
 - **Rust for the core, CLIs and wasm.** One Cargo workspace. The encoder is a
   fork of Dropbox's rust-brotli. The Worker shell is thin JS around raw
   wasm exports (D-021). (D-003)
-- **The server deployment is a Cloudflare Worker compressing proxy.** wasm
+- **The demo deployment is a Cloudflare Worker compressing proxy.** wasm
   core, origin behind it, pre-encoded bodies sent with `encodeBody: "manual"`.
-  Budget for the Worker limits: 128 MB per isolate including wasm memory, and
-  per-request CPU caps. (D-004)
+  It is a proof of concept; the goal is direct platform implementations, so
+  core limits are tunable knobs with measured costs, and Worker budgets
+  (128 MB per isolate, CPU caps) configure only the demo. (D-004, D-029)
 - **Hot path reads, learning writes off-request.** The compression path only
   reads shared state. Learning can be shed without affecting validity, and a
   cold cache uses a q2-class reference encoder with the same window and flush
@@ -119,10 +120,12 @@ build → commit loop, on-demand reviews, and the human commit gate.
 
 ## Current status
 
-**M0 and M1 are done** (2026-10-22). M1's baselines are in
+**M0, M1 and M2 are done** (2026-10-22). M1's baselines are in
 [docs/m1-report.md](docs/m1-report.md); its exit (D-028) set the Pareto
 targets against the C curve, put the parse cache (M3) before route models
-(M4) and kept dcb in M8. **M2 is next:** command injection and per-flush
-output in the fork. Capture sessions continue. See
-[docs/plan.md](docs/plan.md). Keep this paragraph short and current
+(M4) and kept dcb in M8. M2 added the fork's verified external-command
+writer, the per-flush `Stream` with a q2-class cold path, and the
+inspector; its corpus results are in plan.md. **M3 is next:** the offline
+parse cache. Capture sessions continue. See [docs/plan.md](docs/plan.md).
+Keep this paragraph short and current
 when plan.md milestone status changes (rule 4).

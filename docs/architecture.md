@@ -4,9 +4,13 @@
 > shell by D-021, toolchain and layout by D-023, and blob delivery and initial
 > resource caps by D-024 (to be validated in M6).
 > This document specifies the required interfaces and behavior; it does not
-> claim they are implemented. As of M1 the workspace layout exists:
-> `chunky-core` holds only the reference-encoder driver, `chunky-wasm` exposes
-> the slot exports over it, and `worker/` is a minimal proxy shell.
+> claim they are implemented. As of M2, the fork's `enc/external.rs` writes
+> verified per-flush meta-blocks from external commands or its q2-class
+> search over a capped ring (`ExternalEncoder`). `chunky-core::stream` wraps
+> it in the `Engine`/`Stream` shape below, and `chunky-core::inspect` is an
+> independent instrumented decoder. `chunky-wasm` still exposes the slot
+> exports over the reference encoder, and `worker/` is a minimal proxy
+> shell.
 > The encoder mechanisms are in [design.md](design.md).
 
 ## Fixed points
@@ -75,15 +79,26 @@ compression. Core fragmentation tests hold logical flush positions fixed.
 End-to-end delivery tests measure paced markers, not preservation of origin
 writes as read chunks.
 
-## Shared engine and per-stream state (D-025)
+## Shared engine, per-thread workspace and per-stream state (D-025, D-029)
 
-One immutable `Engine` per Worker isolate or server process holds everything
-that is response-independent: static tables, model, warm cache, cut rules,
-dictionaries with offline-built match indexes, and precomputed tables. Natively
-it is `Send + Sync` behind `Arc`; in the Worker it lives in the single wasm
-instance (D-024). A `Stream<'engine>` owns only response-dependent state
-(retained history up to its cap, a cap-sized miss hasher, command, table and
-output scratch). It runs in a slot that is reset and reused, never freed and
+Memory is accounted in three classes, budgeted and reported separately
+(D-029):
+
+- **Shared, per process or isolate:** one immutable `Engine` holds everything
+  that is response-independent: static tables, model, warm cache, cut rules,
+  dictionaries with offline-built match indexes, and precomputed tables.
+  Natively it is `Send + Sync` behind `Arc`; in the Worker it lives in the
+  single wasm instance (D-024). It is paid once for all parallel requests, so
+  it has far more headroom than per-stream state.
+- **Per thread:** a `Workspace` holds block scratch (the native command
+  array, the bit writer's buffer, histogram scratch and table-construction
+  temporaries). Nothing in it outlives one meta-block, so every stream a
+  thread encodes reuses it.
+- **Per stream:** a `Stream<'engine>` owns only response-dependent state:
+  retained history up to its cap, the miss hasher, carry bits and the parse
+  cursor. This is the class that scales with concurrent requests.
+
+A stream runs in a slot that is reset and reused, never freed and
 rebuilt. Artifacts load in place: validation plus slices over a bundled data
 module or a read-only `mmap`, never a parse into heap structures. Engine init
 happens once per isolate or process. Per-response setup is slot reset only.

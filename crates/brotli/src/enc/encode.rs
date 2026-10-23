@@ -191,6 +191,9 @@ pub struct BrotliEncoderStateStruct<Alloc: BrotliAlloc> {
     pub recoder_state: RecoderState,
     custom_dictionary_size: Option<core::num::NonZeroUsize>,
     custom_dictionary: bool,
+    /// chunky fork (D-020): per-meta-block parse capture, when enabled.
+    #[cfg(feature = "std")]
+    parse_log: Option<super::external::ParseLog>,
 }
 
 pub fn set_parameter(
@@ -345,6 +348,7 @@ pub fn BrotliEncoderInitParams() -> BrotliEncoderParams {
         appendable: false,
         magic_number: false,
         favor_cpu_efficiency: false,
+        max_backward_distance: 0,
         hasher: BrotliHasherParams {
             type_: 6,
             block_bits: 9 - 1,
@@ -400,7 +404,7 @@ impl<Alloc: BrotliAlloc> BrotliEncoderStateStruct<Alloc> {
     }
 }
 
-fn RingBufferInit<AllocU8: alloc::Allocator<u8>>() -> RingBuffer<AllocU8> {
+pub(crate) fn RingBufferInit<AllocU8: alloc::Allocator<u8>>() -> RingBuffer<AllocU8> {
     RingBuffer {
         size_: 0,
         mask_: 0, // 0xff??
@@ -462,11 +466,34 @@ impl<Alloc: BrotliAlloc> BrotliEncoderStateStruct<Alloc> {
             recoder_state: RecoderState::new(),
             custom_dictionary: false,
             custom_dictionary_size: None,
+            #[cfg(feature = "std")]
+            parse_log: None,
         }
     }
 }
 
-fn RingBufferFree<AllocU8: alloc::Allocator<u8>>(m: &mut AllocU8, rb: &mut RingBuffer<AllocU8>) {
+#[cfg(feature = "std")]
+impl<Alloc: BrotliAlloc> BrotliEncoderStateStruct<Alloc> {
+    /// chunky fork (D-020): record every meta-block's commands, in logical
+    /// form with their distance short codes, as they are written. q0/q1
+    /// never build commands, so they record nothing.
+    pub fn enable_parse_log(&mut self) {
+        self.parse_log = Some(super::external::ParseLog::default());
+    }
+
+    /// The meta-blocks recorded since the last call.
+    pub fn take_parse_log(&mut self) -> std::vec::Vec<super::external::CapturedBlock> {
+        match self.parse_log.as_mut() {
+            Some(log) => core::mem::take(&mut log.blocks),
+            None => std::vec::Vec::new(),
+        }
+    }
+}
+
+pub(crate) fn RingBufferFree<AllocU8: alloc::Allocator<u8>>(
+    m: &mut AllocU8,
+    rb: &mut RingBuffer<AllocU8>,
+) {
     m.free_cell(core::mem::take(&mut rb.data_mo));
 }
 fn DestroyHasher<Alloc: alloc::Allocator<u16> + alloc::Allocator<u32>>(
@@ -600,7 +627,7 @@ fn RingBufferSetup<AllocU8: alloc::Allocator<u8>>(
     rb.total_size_ = rb.size_.wrapping_add(rb.tail_size_);
 }
 
-fn EncodeWindowBits(
+pub(crate) fn EncodeWindowBits(
     lgwin: i32,
     large_window: bool,
     last_bytes: &mut u16,
@@ -748,13 +775,16 @@ fn RingBufferWriteTail<AllocU8: alloc::Allocator<u8>>(
     }
 }
 
-fn RingBufferWrite<AllocU8: alloc::Allocator<u8>>(
+pub(crate) fn RingBufferWrite<AllocU8: alloc::Allocator<u8>>(
     m: &mut AllocU8,
     bytes: &[u8],
     n: usize,
     rb: &mut RingBuffer<AllocU8>,
 ) {
-    if rb.pos_ == 0u32 && (n < rb.tail_size_ as usize) {
+    // chunky fork: skip the small first-write buffer when a reset encoder
+    // already holds a full-size one (`external.rs`); upstream never reaches
+    // position 0 with `cur_size_ == total_size_`.
+    if rb.pos_ == 0u32 && (n < rb.tail_size_ as usize) && rb.cur_size_ < rb.total_size_ {
         rb.pos_ = n as u32;
         RingBufferInitBuffer(m, rb.pos_, rb);
         rb.data_mo.slice_mut()[rb.buffer_index..(rb.buffer_index + n)]
@@ -1115,7 +1145,9 @@ fn BrotliMakeHasher<Alloc: alloc::Allocator<u16> + alloc::Allocator<u32>>(
 
     //  return UnionHasher::Uninit;
 }
-fn HasherReset<Alloc: alloc::Allocator<u16> + alloc::Allocator<u32>>(t: &mut UnionHasher<Alloc>) {
+pub(crate) fn HasherReset<Alloc: alloc::Allocator<u16> + alloc::Allocator<u32>>(
+    t: &mut UnionHasher<Alloc>,
+) {
     match t {
         &mut UnionHasher::Uninit => {}
         _ => (t.GetHasherCommon()).is_prepared_ = 0i32,
@@ -1298,7 +1330,7 @@ pub fn BrotliEncoderMaxCompressedSize(input_size: usize) -> usize {
     }
 }
 
-fn InitOrStitchToPreviousBlock<Alloc: alloc::Allocator<u16> + alloc::Allocator<u32>>(
+pub(crate) fn InitOrStitchToPreviousBlock<Alloc: alloc::Allocator<u16> + alloc::Allocator<u32>>(
     m: &mut Alloc,
     handle: &mut UnionHasher<Alloc>,
     data: &[u8],
@@ -1354,7 +1386,7 @@ fn should_compress(
 }
 
 /* Chooses the literal context mode for a metablock */
-fn ChooseContextMode(
+pub(crate) fn ChooseContextMode(
     params: &BrotliEncoderParams,
     data: &[u8],
     pos: usize,
@@ -1623,7 +1655,7 @@ impl<Alloc: BrotliAlloc> BrotliEncoderStateStruct<Alloc> {
     }
 }
 
-fn WrapPosition(position: u64) -> u32 {
+pub(crate) fn WrapPosition(position: u64) -> u32 {
     let mut result: u32 = position as u32;
     let gb: u64 = position >> 30;
     if gb > 2 {
@@ -1941,7 +1973,7 @@ fn WriteEmptyLastBlocksInternal(
         BrotliWriteEmptyLastMetaBlock(storage_ix, storage)
     }
 }
-fn WriteMetaBlockInternal<Alloc: BrotliAlloc, Cb>(
+pub(crate) fn WriteMetaBlockInternal<Alloc: BrotliAlloc, Cb>(
     alloc: &mut Alloc,
     data: &[u8],
     mask: usize,
@@ -2169,7 +2201,7 @@ fn WriteMetaBlockInternal<Alloc: BrotliAlloc, Cb>(
     }
 }
 
-fn ChooseDistanceParams(params: &mut BrotliEncoderParams) {
+pub(crate) fn ChooseDistanceParams(params: &mut BrotliEncoderParams) {
     let mut num_direct_distance_codes = 0u32;
     let mut distance_postfix_bits = 0u32;
 
@@ -2428,9 +2460,11 @@ impl<Alloc: BrotliAlloc> BrotliEncoderStateStruct<Alloc> {
             bytes as usize,
             is_last,
         );
+        // chunky fork: C passes `ringbuffer_.buffer_` (data + 2); upstream
+        // passed the allocation start, so the UTF-8 test read two bytes early.
         let literal_context_mode = ChooseContextMode(
             &self.params,
-            self.ringbuffer_.data_mo.slice(),
+            &self.ringbuffer_.data_mo.slice()[self.ringbuffer_.buffer_index..],
             WrapPosition(self.last_flush_pos_) as usize,
             mask as usize,
             (self.input_pos_.wrapping_sub(self.last_flush_pos_)) as usize,
@@ -2494,6 +2528,16 @@ impl<Alloc: BrotliAlloc> BrotliEncoderStateStruct<Alloc> {
             //s.storage_.slice_mut()[0] = (*s).last_bytes_ as u8;
             //s.storage_.slice_mut()[1] = ((*s).last_bytes_ >> 8) as u8;
 
+            #[cfg(feature = "std")]
+            if let Some(log) = self.parse_log.as_mut() {
+                log.record(
+                    &self.commands_.slice()[..self.num_commands_],
+                    &self.params,
+                    self.last_flush_pos_,
+                    metablock_size as usize,
+                    &self.saved_dist_cache_,
+                );
+            }
             WriteMetaBlockInternal(
                 &mut self.m8,
                 &mut self.ringbuffer_.data_mo.slice_mut()[self.ringbuffer_.buffer_index..],

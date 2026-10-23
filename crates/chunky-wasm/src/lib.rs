@@ -118,6 +118,14 @@ pub extern "C" fn slot_release(slot: i32) {
     });
 }
 
+/// FNV-1a digest of synthetic fixtures encoded through every encoder path.
+/// It exists for the native-vs-wasm identity check (`scripts/check.sh`): the
+/// native `chunky identity-digest` and this export must agree.
+#[unsafe(no_mangle)]
+pub extern "C" fn identity_digest() -> u64 {
+    chunky_core::selftest::identity_digest()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -8,10 +8,13 @@ mod encoders;
 mod flushes;
 mod funnel;
 mod generic_reuse;
+mod identity;
+mod inspect;
 mod mem;
 mod parse_stats;
 mod provenance;
 mod reach;
+mod replay;
 mod summarize;
 
 use anyhow::Result;
@@ -45,8 +48,14 @@ enum Cmd {
     Funnel(funnel::Args),
     /// Held-out-origin chunk reuse per content type (generic tier, D-026).
     GenericReuse(generic_reuse::Args),
+    /// Meta-block structure of a br stream (independent RFC 7932 decoder).
+    Inspect(inspect::Args),
     /// CPU timing under hostlock exclusive, pinned to one core (D-023).
     Bench(bench::Args),
+    /// Print the synthetic-fixture identity digest (native side of the wasm check).
+    IdentityDigest(identity::Args),
+    /// Explain M2 stream-encoder sizes against the reference curve on the corpus.
+    Replay(replay::Args),
 }
 
 fn main() -> Result<()> {
@@ -60,5 +69,8 @@ fn main() -> Result<()> {
         Cmd::Bench(a) => bench::run(a),
         Cmd::Funnel(a) => funnel::run(a),
         Cmd::GenericReuse(a) => generic_reuse::run(a),
+        Cmd::Inspect(a) => inspect::run(a),
+        Cmd::IdentityDigest(a) => identity::run(a),
+        Cmd::Replay(a) => replay::run(a),
     }
 }

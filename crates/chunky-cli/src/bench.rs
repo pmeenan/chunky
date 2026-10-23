@@ -5,7 +5,9 @@
 //! one warm-up pass over the sample, then `--reps` timed passes (at least
 //! 10), reporting the median and median absolute deviation. Also times
 //! per-response setup (D-025): encoder create/destroy, a whole 1 KiB
-//! response, and C dictionary preparation.
+//! response, and C dictionary preparation. `--stream-knobs` also times
+//! chunky's stream writer along its knobs (D-029), including the writer
+//! alone on injected q11 parses (captured once, outside the timing).
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -49,6 +51,9 @@ pub struct Args {
     /// labeled unlocked and are not measurements.
     #[arg(long)]
     no_lock: bool,
+    /// Also time chunky's stream writer along its knobs (lgwin 22).
+    #[arg(long)]
+    stream_knobs: bool,
 }
 
 const INNER: &str = "CHUNKY_BENCH_INNER";
@@ -170,6 +175,9 @@ pub fn run(a: Args) -> Result<()> {
             }
         }
     }
+    if a.stream_knobs {
+        results.extend(stream_knobs(&a, &sample, &bodies)?);
+    }
     let setup = setup_times(&a, &qs, &sample, &bodies, &dicts)?;
     if let Some(p) = &a.out {
         std::fs::write(
@@ -181,6 +189,102 @@ pub fn run(a: Args) -> Result<()> {
         eprintln!("wrote {}", p.display());
     }
     Ok(())
+}
+
+/// chunky's stream writer, one knob at a time (lgwin 22, compact ring).
+/// "inj" configs feed each response's buffered q11 parse, captured before
+/// timing and cloned before each pass's clock starts, so they time the
+/// writer alone: verification, code resolution and table construction.
+fn stream_knobs(a: &Args, sample: &[Row], bodies: &[Vec<u8>]) -> Result<Vec<serde_json::Value>> {
+    use chunky_core::reference::{ReferenceParams, capture_parse};
+    use chunky_core::stream::{
+        Engine as StreamEngine, ExternalCommand, StreamOptions, Workspace, encode_with_flushes,
+        flatten_parse,
+    };
+    let parses: Vec<Vec<ExternalCommand>> = bodies
+        .iter()
+        .map(|b| {
+            capture_parse(&ReferenceParams::new(11, 22), b, &[])
+                .map(|(_, blocks)| flatten_parse(&blocks))
+                .map_err(|e| anyhow!("{e}"))
+        })
+        .collect::<Result<_>>()?;
+    let inj = |tq: u32, block_bits: u32| StreamOptions {
+        table_quality: tq,
+        block_bits,
+        ..StreamOptions::external(22, tq)
+    };
+    let cold = |block_bits: u32| StreamOptions {
+        block_bits,
+        ..StreamOptions::cold(22)
+    };
+    let configs: Vec<(String, StreamOptions, bool)> = vec![
+        ("inj-q11parse-t2-b16".into(), inj(2, 16), true),
+        ("inj-q11parse-t5-b16".into(), inj(5, 16), true),
+        ("inj-q11parse-t11-b16".into(), inj(11, 16), true),
+        ("inj-q11parse-t2-b18".into(), inj(2, 18), true),
+        ("inj-q11parse-t11-b18".into(), inj(11, 18), true),
+        ("cold-q2-b14".into(), cold(14), false),
+        ("cold-q2-b16".into(), cold(16), false),
+        ("cold-q2-b18".into(), cold(18), false),
+        ("cold-q2-b20".into(), cold(20), false),
+    ];
+    let total: usize = bodies.iter().map(Vec::len).sum();
+    let mut results = Vec::new();
+    println!(
+        "
+chunky stream knobs (lgwin 22, compact ring):
+"
+    );
+    println!("| Config | Schedule | Median ms | MAD ms | ms/MB | MB/s | Bytes out |");
+    println!("| --- | --- | --- | --- | --- | --- | --- |");
+    for (label, opts, injected) in &configs {
+        let engine = StreamEngine::new(*opts).map_err(|e| anyhow!("{label}: {e}"))?;
+        for s in &a.schedules {
+            let flushes: Vec<Vec<usize>> = sample
+                .iter()
+                .map(|r| {
+                    let sc = schedule(s, r)?;
+                    // A PROCESS-only schedule has no logical flushes.
+                    Ok(if sc.flush { sc.cuts } else { Vec::new() })
+                })
+                .collect::<Result<_>>()?;
+            let mut out_bytes = 0usize;
+            // One workspace per thread, reused across responses.
+            let mut ws = Workspace::default();
+            let mut pass = || -> Result<f64> {
+                let mut ps: Vec<Option<Vec<ExternalCommand>>> =
+                    parses.iter().map(|p| injected.then(|| p.clone())).collect();
+                let t = Instant::now();
+                let mut n = 0;
+                for (i, body) in bodies.iter().enumerate() {
+                    let (out, _) =
+                        encode_with_flushes(&engine, &mut ws, ps[i].take(), body, &flushes[i])
+                            .map_err(|e| anyhow!("{label}: {e}"))?;
+                    n += out.len();
+                    std::hint::black_box(out);
+                }
+                let ms = t.elapsed().as_secs_f64() * 1e3;
+                out_bytes = n;
+                Ok(ms)
+            };
+            pass()?;
+            let times: Vec<f64> = (0..a.reps).map(|_| pass()).collect::<Result<_>>()?;
+            let (med, mad) = med_mad(&times);
+            let ms_per_mb = med / (total as f64 / 1e6);
+            println!(
+                "| {label} | {s} | {med:.1} | {mad:.2} | {ms_per_mb:.2} | {:.1} | {} |",
+                1e3 / ms_per_mb,
+                fmt_int(out_bytes as u64)
+            );
+            results.push(
+                json!({"config": label, "engine": "chunky-stream", "schedule": s,
+                "bytes": total, "out_bytes": out_bytes, "median_ms": med, "mad_ms": mad,
+                "ms_per_mb": ms_per_mb, "times_ms": times}),
+            );
+        }
+    }
+    Ok(results)
 }
 
 /// Rows spread evenly over the (hash-sorted) corpus until about `budget` bytes.
@@ -255,6 +359,10 @@ fn setup_times(
                                 &chunky_core::reference::ReferenceParams::new(q, w),
                             )?,
                         )),
+                        Engine::Chunky => {
+                            let e = crate::encoders::chunky_engine(&cfg)?;
+                            drop(std::hint::black_box(e.stream()));
+                        }
                     }
                     let c = t.elapsed().as_secs_f64() * 1e6;
                     let t = Instant::now();

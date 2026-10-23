@@ -16,6 +16,8 @@ pub mod context_map_entropy;
 pub mod dictionary_hash;
 pub mod encode;
 pub mod entropy_encode;
+#[cfg(feature = "std")]
+pub mod external;
 pub mod find_stride;
 pub mod fixed_queue;
 pub mod histogram;

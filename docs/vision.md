@@ -19,8 +19,11 @@ chunky is a research implementation of that idea, specified in
 - **CLI tools** for building and measuring it. They capture a corpus, run
   baselines, measure chunk overlap, encode, and train models and warm caches.
 - **A Cloudflare Worker** that runs the encoder as wasm in a compressing proxy
-  in front of an origin. This is the server deployment where the design's
-  streaming and learning claims get tested under real request shapes.
+  in front of an origin. This is the proof-of-concept deployment where the
+  design's streaming and learning claims get tested under real request
+  shapes. The end goal is implementation directly in serving platforms, each
+  with its own trade-offs, so the encoder exposes its resource limits as
+  knobs with measured costs (D-029).
 
 The secondary target, cheap CDT dictionary variants of static assets and a
 generated site dictionary, builds on the same chunk index.

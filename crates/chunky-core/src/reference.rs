@@ -86,6 +86,18 @@ impl ReferenceEncoder {
         })
     }
 
+    /// Record each meta-block's parse from here on (q2 and up; see
+    /// `take_parse_log`).
+    pub fn enable_parse_log(&mut self) {
+        self.state.enable_parse_log();
+    }
+
+    /// The meta-blocks written since the last call, as logical commands
+    /// with their distance short codes.
+    pub fn take_parse_log(&mut self) -> Vec<brotli::enc::external::CapturedBlock> {
+        self.state.take_parse_log()
+    }
+
     /// Feed `input` with `op` and append everything the encoder emits to
     /// `out`. Flush and Finish run until the operation completes.
     pub fn push(&mut self, input: &[u8], op: Op, out: &mut Vec<u8>) -> Result<(), EncodeError> {
@@ -149,6 +161,29 @@ pub fn compress_with_flushes(
     }
     e.push(&input[pos..], Op::Finish, &mut out)?;
     Ok(out)
+}
+
+/// Like [`compress_with_flushes`], also returning the reference encoder's
+/// parse, one entry per meta-block (q2 and up; q0/q1 record nothing).
+pub fn capture_parse(
+    p: &ReferenceParams,
+    input: &[u8],
+    flushes: &[usize],
+) -> Result<(Vec<u8>, Vec<brotli::enc::external::CapturedBlock>), EncodeError> {
+    let mut e = ReferenceEncoder::new(p)?;
+    e.enable_parse_log();
+    let mut out = Vec::new();
+    let mut pos = 0;
+    for &f in flushes {
+        let f = f.min(input.len());
+        if f > pos {
+            e.push(&input[pos..f], Op::Flush, &mut out)?;
+            pos = f;
+        }
+    }
+    e.push(&input[pos..], Op::Finish, &mut out)?;
+    let log = e.take_parse_log();
+    Ok((out, log))
 }
 
 #[cfg(test)]
@@ -230,6 +265,44 @@ mod tests {
                 rust.len(),
                 c.len()
             );
+        }
+    }
+
+    /// rust-brotli's q10/q11 UTF-8 test read the ring buffer two bytes early
+    /// (fixed in the fork, `crates/brotli/CHUNKY.md`). 1,000 bytes with 249
+    /// lone 0xFF bytes and two ASCII bytes last: C counts 751 UTF-8 bytes,
+    /// above its 75% cutoff (UTF-8 context mode). The shifted window swapped
+    /// the last two bytes for the buffer's two leading NULs, which brotli
+    /// does not count as UTF-8, so it saw 749 (signed).
+    #[test]
+    fn literal_context_mode_matches_c_at_the_utf8_threshold() {
+        let mut input: Vec<u8> = (0..998)
+            .map(|i| {
+                if i % 4 == 3 {
+                    0xff
+                } else {
+                    b'a' + (i % 5) as u8
+                }
+            })
+            .collect();
+        input.extend_from_slice(b"zz");
+        for q in [10, 11] {
+            let rust = compress_with_flushes(&ReferenceParams::new(q, 22), &input, &[]).unwrap();
+            let mut c = Vec::new();
+            let mut e = brotli_c::Encoder::new(&brotli_c::EncoderParams::new(q, 22)).unwrap();
+            e.push(&input, brotli_c::Op::Finish, &mut c).unwrap();
+            let modes = |s: &[u8]| -> Vec<Vec<u8>> {
+                crate::inspect::inspect(s)
+                    .unwrap()
+                    .blocks
+                    .into_iter()
+                    .map(|b| b.context_modes)
+                    .filter(|m| !m.is_empty())
+                    .collect()
+            };
+            let (rm, cm) = (modes(&rust), modes(&c));
+            assert_eq!(cm, vec![vec![2]], "q{q}: C picks UTF-8");
+            assert_eq!(rm, cm, "q{q}: literal context modes");
         }
     }
 

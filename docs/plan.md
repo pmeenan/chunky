@@ -204,7 +204,7 @@ returned a no-go. Q1's single-block browser research is parked; the initial
 fallback is the accepted per-flush design. M0 remains open until that owner
 call; this revision does not claim the spikes are complete.
 
-## Milestone ladder  `M2 next`
+## Milestone ladder  `M3 next`
 
 All reported results name corpus/split/artifact versions and exact commands.
 Model/cache/cut rules are frozen before evaluation, with no evaluation-driven
@@ -284,7 +284,7 @@ route model (M4) comes before the parse cache (M3), and (b) whether dcb with an
 existing document dictionary (Google's) moves ahead of M5. No performance
 promise is inferred from chunk overlap alone.
 
-### M2: Command injection and byte-preserving per-flush output  `pending`
+### M2: Command injection and byte-preserving per-flush output  `done (2026-10-22)`
 
 Forked encoder accepts external commands with fast and q11 oracle table modes.
 Capture and reinject q11 parses; verify byte identity on decode and explain any
@@ -295,6 +295,122 @@ history or the dictionary slice before emission (D-017). Retained history is a
 configured cap, separate from the declared WBITS. The independent round-trip
 verifier, inspector and property tests land here, including a native-vs-wasm
 byte-identity test that runs with the regular checks.
+
+Progress (2026-10-22):
+
+- [x] Fork `enc/external.rs` (`crates/brotli/CHUNKY.md`): `ExternalEncoder`
+      writes one actual-length meta-block per call from logical commands or
+      its own q2–q9 search, over a ring sized from the retained-history cap
+      rather than WBITS (compact by default: the ring holds the history plus
+      one open block, half the reference encoder's ring). Every copy and static-dictionary
+      word is compared before emission; failures become literals. Short
+      codes and dictionary wire distances resolve at emit time; a per-command
+      code hint replays captured parses exactly (RE-011). No hasher is
+      allocated without search. Tables: q2 fast, q4–q9 greedy, q10/q11 oracle.
+- [x] `chunky-core::stream`: `Engine`/`Stream` with `feed`/`flush`/`finish`,
+      a byte cap per meta-block (default 64 KiB), flush alignment by empty
+      metadata block, injected parses split at block boundaries, and the
+      cold path (`StreamOptions::cold`: q2 search and tables, history = the
+      declared window, D-029). `reference::capture_parse` records
+      the reference encoder's parse per meta-block.
+- [x] Tests (`stream_tests.rs`): C and Rust decoders on every fixture,
+      config and flush schedule; each flush's output plus `0x03` decodes to
+      the prefix; feed fragmentation never changes output (proptest);
+      corrupted and arbitrary command lists never corrupt output; the
+      retained cap bounds distances; empty, tiny, repeated-flush and
+      cap-boundary cases. `selftest::identity_digest` runs natively and in
+      V8 in `scripts/check.sh` (`worker/test/identity.test.mjs`) and asserts
+      fragmented feeding reproduces each output.
+- [x] Inspector: `chunky-core::inspect` is an independent RFC 7932 decoder
+      that reports per-meta-block structure (`chunky inspect <file.br>`).
+- [x] Corpus replay (`chunky replay <sessions> --out
+      data/reports/m2/replay.jsonl`; 94 pages, 74.8 MB, lgwin 22, sizes vs
+      rust-brotli q11 on the same schedule, all decoded with C):
+
+      | Config | Buffered | Served | Reads |
+      | --- | --- | --- | --- |
+      | reference q2 | 1.241 | 1.236 | 1.246 |
+      | reference q5 | 1.106 | 1.105 | 1.069 |
+      | cold path (q2, 4 MiB history, compact ring) | 1.244 | 1.237 | 1.246 |
+      | cold path, 256 KiB history (compact ring) | 1.313 | 1.307 | 1.309 |
+      | q11 parse, oracle tables, 64 KiB blocks | 1.014 | 1.011 | 0.999 |
+      | q11 parse, oracle tables, 256 KiB blocks | 1.005 | 1.004 | 0.999 |
+      | q11 parse, fast (q2) tables, 64 KiB blocks | 1.044 | 1.040 | 1.059 |
+      | q11 parse, greedy (q5) tables, 64 KiB blocks | 1.032 | 1.027 | 0.995 |
+
+      - The q11 parse replayed on its own block layout is byte-identical to
+        reference q11 on 94 of 94 pages. No copy was rejected anywhere.
+      - Size differences from the original arrangement: block layout costs
+        1.4% at 64 KiB and 0.5% at 256 KiB; fast tables cost 3–6% more than
+        oracle tables. On per-read flushing the buffered parse beats the
+        reference q11, which re-parses around each flush.
+      - The cold path matches reference q2's size on every page under
+        per-read flushing and is within 0.2% elsewhere. A full-size ring gives
+        identical output here (no page exceeds 4 MiB minus one block), so the
+        compact ring halves ring memory for free on this corpus. Cutting
+        history to 256 KiB costs 5.9–6.6% (Google) and 3.2–3.5% (Etsy).
+- [x] CPU, cold path (`chunky bench <sessions> --engines c,rust,chunky
+      --qualities 2,5`, hostlock exclusive, one core, 8 MB sample;
+      `data/reports/m2/bench-cold.json`): q2 5.19 ms/MB buffered and 6.64
+      per read, against rust q2 4.57/6.02 and C q2 3.21/4.52. The ~13% over
+      rust is verification plus the logical-command round trip; at q5 the
+      stream matches rust (13.1 vs 13.2 ms/MB). Verification does not
+      dominate (D-017 stands), but the cold path is above D-028's 4.8 ms/MB.
+- [x] CPU per knob (`chunky bench <sessions> --engines c --qualities
+      2,5,9,11 --stream-knobs`, same method and sample;
+      `data/reports/m2/bench-knobs.json`). The injected rows time the writer
+      alone on each page's q11 parse (captured before timing): verification,
+      code resolution and tables. ms/MB:
+
+      | Config | Buffered | Served | Reads |
+      | --- | --- | --- | --- |
+      | C q2 / q5 / q9 | 3.26 / 8.88 / 28.4 | 3.29 / 8.75 / 28.6 | 4.56 / 13.2 / 33.4 |
+      | C q11 | 953 | 896 | 919 |
+      | Injected q11 parse, q2 tables | 2.21 | 2.27 | 3.41 |
+      | Injected q11 parse, q5 tables | 3.16 | 3.32 | 7.35 |
+      | Injected q11 parse, q11 tables | 47.8 | 48.7 | 138 |
+      | Injected, q11 tables, 256 KiB blocks | 65.4 | 59.6 | 139 |
+      | Cold path, 16 / 64 / 256 KiB / 1 MiB blocks | 5.63 / 5.10 / 5.01 / 5.16 | 5.66 / 5.17 / 5.15 / 5.34 | 6.61 / 6.62 / 6.64 / 6.68 |
+
+      - Given a q11-quality parse, q5-grade tables cost 3.2–3.3 ms/MB on
+        buffered and served schedules, under C q2. Size is 1.017–1.024 × rust
+        q11 on Google and 1.050 on Etsy (replay table above), inside D-028's
+        C-q9 target. This excludes the cache lookup M3 adds, and assumes
+        every byte has a q11 parse. Per-read flushing doubles the q5-table
+        cost (7.35) because greedy splitting runs per small block.
+      - q11-grade tables (full block splitting and clustering) cost 15× q5
+        tables for 1–2% of size. That is the part design.md moves offline into
+        the route model (M4), where only a cheap table build from counts and
+        a shared prior stays per block.
+      - Block size barely moves cold-path CPU between 64 KiB and 1 MiB;
+        16 KiB costs 10% more.
+- [x] Memory by class (D-029; `chunky mem <sessions> --stream-only`, served
+      schedule; `data/reports/m2/mem.md`). Per stream is held for the
+      response's life; per thread is the reused workspace (retained
+      high-water plus the transient peak while a block is written). M2 has
+      no shared engine state yet. Median page 548 KB, largest 2.28 MB; C q2
+      at lgwin 22 peaks at 8.8 MiB per encoder, all of it per stream.
+
+      | Knob (one changed from the cold default) | Per stream, 1 KiB | Per stream, largest | Per thread retained + transient |
+      | --- | --- | --- | --- |
+      | Default: 4 MiB history, compact ring, 64 KiB blocks, q2 | 0.25 MiB | 4.31 MiB | 1.00 + 0.01 MiB |
+      | 4 MiB history, full ring | 0.25 MiB | 8.31 MiB | 1.00 + 0.01 MiB |
+      | 1 MiB history, compact ring | 0.25 MiB | 1.31 MiB | 1.00 + 0.01 MiB |
+      | 256 KiB history, compact ring | 0.25 MiB | 0.56 MiB | 1.00 + 0.01 MiB |
+      | 16 KiB blocks | 0.25 MiB | 4.27 MiB | 0.25 + 0.01 MiB |
+      | 256 KiB blocks | 0.25 MiB | 4.50 MiB | 3.75 + 0.01 MiB |
+      | 1 MiB blocks | 0.25 MiB | 5.25 MiB | 13.73 + 0.01 MiB |
+      | q5 search and tables | 1.03 MiB | 5.09 MiB | 0.94 + 0.11 MiB |
+      | q9 search and tables | 32.06 MiB | 36.13 MiB | 0.94 + 0.11 MiB |
+      | q2 search, q11 tables | 0.25 MiB | 4.31 MiB | 1.00 + 0.96 MiB |
+      | Injected q11 parse (no hasher), q11 tables | 0.00 MiB | 4.06 MiB | 1.05 + 0.71 MiB |
+
+      - Per stream is the ring (allocated as input arrives) plus the search
+        hasher, which dominates small responses (0.25 MiB at q2, 32 MiB at
+        q9). An injected parse needs no hasher.
+      - Block size is almost entirely a per-thread cost: about 12 bytes of
+        command scratch per block byte, sized for one command per two bytes.
+        Sizing it from actual command counts would shrink it further.
 
 **Exit:** every fixture decodes exactly with C brotli and the Rust reference;
 cover empty/tiny blocks, unmatched tails, overlapping copies, literal contexts,

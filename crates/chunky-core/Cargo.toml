@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 brotli.workspace = true
+brotli-decompressor.workspace = true
 
 [dev-dependencies]
 brotli-c.workspace = true

@@ -14,6 +14,9 @@ use crate::corpus::Row;
 pub enum Engine {
     C,
     Rust,
+    /// chunky's M2 stream on its cold path: q2–q9 search and tables over the
+    /// declared window (`StreamOptions::cold`, D-029).
+    Chunky,
 }
 
 impl Engine {
@@ -21,6 +24,7 @@ impl Engine {
         match self {
             Engine::C => "c",
             Engine::Rust => "rust",
+            Engine::Chunky => "chunky",
         }
     }
 
@@ -28,7 +32,8 @@ impl Engine {
         match s {
             "c" => Ok(Engine::C),
             "rust" => Ok(Engine::Rust),
-            _ => Err(anyhow!("unknown engine {s:?} (c, rust)")),
+            "chunky" => Ok(Engine::Chunky),
+            _ => Err(anyhow!("unknown engine {s:?} (c, rust, chunky)")),
         }
     }
 }
@@ -142,12 +147,15 @@ pub fn schedule(name: &str, row: &Row) -> Result<Schedule> {
 /// dictionary and reused (they borrow the bytes from `Dicts`).
 pub struct Ctx<'d> {
     prepared: HashMap<PathBuf, brotli_c::PreparedDictionary<'d>>,
+    /// chunky's per-thread block scratch, reused across responses.
+    ws: chunky_core::stream::Workspace,
 }
 
 impl<'d> Ctx<'d> {
     pub fn new() -> Self {
         Self {
             prepared: HashMap::new(),
+            ws: chunky_core::stream::Workspace::default(),
         }
     }
 
@@ -201,9 +209,36 @@ impl<'d> Ctx<'d> {
                     e.push(chunk, op, &mut out).map_err(|e| anyhow!("{e}"))
                 })?;
             }
+            Engine::Chunky => {
+                if cfg.dict || cfg.no_lcm {
+                    return Err(anyhow!("chunky configs take no dictionary or no-lcm"));
+                }
+                let engine = chunky_engine(cfg)?;
+                let mut s = engine.stream();
+                drive(input, sched, |chunk, op| {
+                    s.feed(&mut self.ws, chunk, &mut out)?;
+                    match op {
+                        Op::Process => Ok(()),
+                        Op::Flush => s.flush(&mut self.ws, &mut out),
+                        Op::Finish => s.finish(&mut self.ws, &mut out),
+                    }
+                    .map_err(|e| anyhow!("{e}"))
+                })?;
+            }
         }
         Ok(out)
     }
+}
+
+/// The cold-path engine for a chunky config (q2..=9).
+pub fn chunky_engine(cfg: &Config) -> Result<chunky_core::stream::Engine> {
+    use chunky_core::stream::StreamOptions;
+    let opts = StreamOptions {
+        table_quality: cfg.quality,
+        search_quality: cfg.quality,
+        ..StreamOptions::cold(cfg.lgwin)
+    };
+    chunky_core::stream::Engine::new(opts).map_err(|e| anyhow!("{}: {e}", cfg.label()))
 }
 
 /// Issue the schedule's calls: one call per segment, FLUSH or PROCESS at each
@@ -270,8 +305,11 @@ mod tests {
         let mut ctx = Ctx::new();
         for name in SCHEDULES {
             let s = schedule(name, &row).unwrap();
-            for engine in [Engine::C, Engine::Rust] {
+            for engine in [Engine::C, Engine::Rust, Engine::Chunky] {
                 for q in [1, 2, 5, 11] {
+                    if engine == Engine::Chunky && !(2..=9).contains(&q) {
+                        continue;
+                    }
                     let cfg = Config {
                         engine,
                         quality: q,

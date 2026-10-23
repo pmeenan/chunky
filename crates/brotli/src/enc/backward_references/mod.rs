@@ -122,6 +122,10 @@ pub struct BrotliEncoderParams {
     /// prefer to compute the map of previously seen strings
     /// just once for all the threads at the beginning, since they overlap significantly
     pub favor_cpu_efficiency: bool,
+    /// chunky fork: if nonzero, the farthest back the H2–H9 searches look,
+    /// below the window's `(1 << lgwin) - 16`; static-dictionary distances
+    /// then start past this limit. 0 derives the limit from `lgwin`.
+    pub max_backward_distance: usize,
 }
 
 impl Default for BrotliEncoderParams {
@@ -2398,7 +2402,10 @@ fn CreateBackwardReferences<AH: AnyHasher>(
     num_literals: &mut usize,
 ) {
     let gap = 0usize;
-    let max_backward_limit: usize = (1usize << params.lgwin).wrapping_sub(16);
+    let mut max_backward_limit: usize = (1usize << params.lgwin).wrapping_sub(16);
+    if params.max_backward_distance != 0 {
+        max_backward_limit = min(max_backward_limit, params.max_backward_distance);
+    }
     let mut new_commands_count: usize = 0;
     let mut insert_length: usize = *last_insert_len;
     let pos_end: usize = position.wrapping_add(num_bytes);

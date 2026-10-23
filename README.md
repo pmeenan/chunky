@@ -26,10 +26,12 @@ What else is in or out of scope is being triaged in
 
 ## Status
 
-**M1 (workspace, corpus and opportunity measurement) is done; M2 is next.**
+**M2 (command injection and per-flush output) is done; M3 is next.**
 The Cargo workspace, the pinned C and rust-brotli reference encoders, corpus
-tooling and the M1 baselines exist; the encoder itself starts in M2. See
-[docs/plan.md](docs/plan.md) and [docs/m1-report.md](docs/m1-report.md).
+tooling and the M1 baselines exist. M2 added the encoder's verified
+per-flush writer with a q2-class cold path, parse capture and replay, and an
+inspector (`chunky inspect`). See [docs/plan.md](docs/plan.md) and
+[docs/m1-report.md](docs/m1-report.md).
 
 ## Building and checking
 

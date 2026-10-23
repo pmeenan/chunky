@@ -30,6 +30,40 @@ Decision / Context / Consequences / Reopen if
 
 ---
 
+## D-029: The Worker is a proof-of-concept demonstration; encoder limits are tunable knobs, not Worker-derived constants  (2026-10-22, status: accepted)
+
+**Decision (stated by the owner, amending how D-004 and D-024 apply).**
+
+- The Cloudflare Worker stays the demonstration deployment (D-004). It is
+  not the end goal. The goal is implementations directly in serving
+  platforms (CDN edges, web servers, origin stacks), each with its own
+  memory, CPU and latency trade-offs.
+- The encoder's resource limits are options with measured trade-offs:
+  retained history, ring sizing, meta-block cap, table quality and search
+  effort. Their defaults favor compression. D-024's slot sizes configure the
+  Worker demo only and do not cap the core's defaults.
+- Reports state the size, CPU and memory cost of each knob, so a platform can
+  pick its own operating point.
+- Memory is accounted in three classes, reported and budgeted separately:
+  shared (the engine's learned artifacts and static tables, paid once per
+  process for all parallel requests), per thread (block scratch, reused by
+  every stream a thread encodes) and per stream (retained history, miss
+  hasher, cursor state). Per-stream memory is what concurrency multiplies,
+  so shared state gets far more headroom: a larger parse cache, model or
+  dictionary index is the preferred place to spend memory.
+
+**Context.** M2 defaulted the cold path to a 256 KiB retained history,
+D-024's small fallback slot, and measured it 2.3–5.4% bigger than reference
+q2. The owner's call: don't limit unnecessarily; know the trade-offs.
+
+**Consequences.** `StreamOptions::cold` uses the full declared window. Memory
+per knob setting is measured for the stream encoder itself. M6 still
+validates the Worker's budget, but it picks operating points from these
+curves rather than setting the core's limits.
+
+**Reopen if.** A platform integration needs a constraint the knobs cannot
+express.
+
 ## D-028: M1 exit: go; Pareto targets set against the C curve; parse cache (M3) before route models (M4); dcb stays after M5  (2026-10-22, status: accepted)
 
 **Decision (the owner's M1 exit call, from [m1-report.md](m1-report.md)).**
@@ -287,7 +321,7 @@ isolate. This entry makes sharing the rule for everything response-independent.
 **Reopen if.** Loading in place costs measurable size or CPU, or Workers
 behavior (for example, isolate reuse) makes per-isolate init a poor fit.
 
-## D-024: Artifacts ship inside the Worker bundle; fixed per-isolate stream slots; aggregate telemetry via Analytics Engine  (2026-10-21, status: accepted)
+## D-024: Artifacts ship inside the Worker bundle; fixed per-isolate stream slots; aggregate telemetry via Analytics Engine  (2026-10-21, status: accepted; Worker-only per D-029)
 
 **Decision (accepted by the owner; the numbers are initial caps that M6 must validate).**
 
@@ -642,7 +676,7 @@ JS boundary, so it offers no copy savings to buy.
 `no-transform`, or a measured CPU budget shows JS/wasm transfers above a few
 percent at the chosen tier.
 
-## D-020: Fork rust-brotli as a vendored crate with an external-command entry point; build it with `portable-float`  (2026-10-21, status: accepted)
+## D-020: Fork rust-brotli as a vendored crate with an external-command entry point; build it with `portable-float`  (2026-10-21, status: accepted; entry-point shape amended 2026-10-22 in M2)
 
 **Decision (Q2 spike recommendation, accepted by the owner).**
 
@@ -706,6 +740,26 @@ claim.
 - Native/wasm byte-identity tests (M2) run with `portable-float` on. Its sizes
   differ slightly from default rust-brotli and from C. The reference curve
   reports the build actually used.
+
+**Amendment (2026-10-22, M2).** The entry point is a separate struct, not
+a function on the reference encoder's state.
+`enc/external.rs::ExternalEncoder` owns its own ring buffer, sized from the
+retained-history cap, and the meta-block writer state, and writes one
+meta-block per call through the existing `WriteMetaBlockInternal`. The
+reference encoder (`BrotliEncoderStateStruct`) stays upstream's code path,
+apart from upstreamable bug fixes and a parse log. A struct of its own keeps
+per-stream state small (D-025), lets the ring follow the retained cap rather
+than `lgwin`, and allocates a hasher only when the cold path searches. The
+consequences listed above all landed in it:
+- the per-command distance-code hint, which also needs an explicit-distance
+  value (RE-011);
+- emit-time verification;
+- no hasher without search;
+- the retained-history cap.
+
+Capture uses a parse log taken just before `WriteMetaBlockInternal`, not
+`log_meta_block`, because the callback drops distance codes. Fork changes
+and upstream candidates are tracked in `crates/brotli/CHUNKY.md`.
 
 **Reopen if.** Upstream accepts an equivalent entry point (switch to a git or
 crates.io dependency), or `portable-float` costs measurable size or CPU
@@ -1151,7 +1205,7 @@ from crates.io metadata: `brotli` 9.0.0 (dropbox/rust-brotli) is
 
 **Reopen if.** A needed capability exists only under a non-permissive license.
 
-## D-004: Server deployment is a Cloudflare Worker compressing proxy (wasm)  (2026-10-21, status: accepted)
+## D-004: Server deployment is a Cloudflare Worker compressing proxy (wasm)  (2026-10-21, status: accepted; scoped to a proof-of-concept demonstration by D-029)
 
 **Decision.** The server deployment is a Cloudflare Worker that sits in front
 of an origin, fetches responses, compresses eligible ones with the chunky
